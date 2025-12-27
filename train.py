@@ -169,9 +169,16 @@ class Trainer:
     def train(
         self,
         epochs: int = 50,
-        early_stopping_patience: int = 10
+        early_stopping_patience: int = 10,
+        progress_callback=None
     ) -> Dict:
-        """Full training loop."""
+        """Full training loop.
+
+        Args:
+            epochs: Number of training epochs
+            early_stopping_patience: Epochs to wait before early stopping
+            progress_callback: Optional callback function(epoch, epochs, train_loss, val_loss, train_acc, val_acc)
+        """
         print(f"\nStarting training for {epochs} epochs...")
         print(f"Model parameters: {self.model.get_num_params():,} trainable\n")
 
@@ -214,6 +221,17 @@ class Trainer:
             # Save checkpoint
             self.save_checkpoint(epoch, is_best)
 
+            # Call progress callback if provided
+            if progress_callback:
+                progress_callback(
+                    epoch=epoch,
+                    total_epochs=epochs,
+                    train_loss=train_loss,
+                    val_loss=val_loss,
+                    train_acc=train_acc,
+                    val_acc=val_acc
+                )
+
             # Early stopping
             if patience_counter >= early_stopping_patience:
                 print(f"\nEarly stopping triggered after {epoch} epochs")
@@ -240,7 +258,8 @@ def train_model(
     learning_rate: float = 1e-4,
     image_size: int = 224,
     freeze_backbone: bool = False,
-    early_stopping_patience: int = 10
+    early_stopping_patience: int = 10,
+    progress_callback=None
 ) -> Dict:
     """
     Main training function.
@@ -256,6 +275,7 @@ def train_model(
         image_size: Image size for training
         freeze_backbone: Whether to freeze backbone weights
         early_stopping_patience: Epochs to wait before early stopping
+        progress_callback: Optional callback function for progress updates
 
     Returns:
         Training history dictionary
@@ -286,7 +306,8 @@ def train_model(
 
     history = trainer.train(
         epochs=epochs,
-        early_stopping_patience=early_stopping_patience
+        early_stopping_patience=early_stopping_patience,
+        progress_callback=progress_callback
     )
 
     return history

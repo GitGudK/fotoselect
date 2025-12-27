@@ -24,7 +24,9 @@ class PhotoCurator:
         checkpoint_path: str,
         backbone: str = 'resnet50',
         device: Optional[torch.device] = None,
-        threshold: float = 0.5
+        threshold: float = 0.5,
+        top_n: Optional[int] = None,
+        top_percent: Optional[float] = None
     ):
         """
         Initialize the curator.
@@ -34,8 +36,12 @@ class PhotoCurator:
             backbone: Model backbone architecture
             device: Device to run inference on
             threshold: Probability threshold for curation (default 0.5)
+            top_n: If set, select exactly this many top-scoring photos
+            top_percent: If set, select top X% of photos (0-100)
         """
         self.threshold = threshold
+        self.top_n = top_n
+        self.top_percent = top_percent
 
         # Device setup
         if device is None:
@@ -93,13 +99,33 @@ class PhotoCurator:
             scores = self.model.predict_proba(images)
 
             for path, score in zip(paths, scores.cpu().numpy()):
-                should_curate = score >= self.threshold
-                results.append((path, float(score), bool(should_curate)))
+                results.append((path, float(score)))
 
         # Sort by score descending
         results.sort(key=lambda x: x[1], reverse=True)
 
-        return results
+        # Determine which photos to curate based on selection mode
+        total = len(results)
+        if self.top_n is not None:
+            # Select exactly top_n photos
+            num_to_select = min(self.top_n, total)
+        elif self.top_percent is not None:
+            # Select top X% of photos
+            num_to_select = max(1, int(total * self.top_percent / 100))
+        else:
+            # Use threshold mode
+            num_to_select = None
+
+        # Add should_curate flag
+        final_results = []
+        for i, (path, score) in enumerate(results):
+            if num_to_select is not None:
+                should_curate = i < num_to_select
+            else:
+                should_curate = score >= self.threshold
+            final_results.append((path, score, bool(should_curate)))
+
+        return final_results
 
     def curate_folder(
         self,
@@ -108,7 +134,8 @@ class PhotoCurator:
         batch_size: int = 16,
         image_size: int = 224,
         copy_files: bool = True,
-        create_rejected_folder: bool = False
+        create_rejected_folder: bool = False,
+        results: Optional[List[Tuple[str, float, bool]]] = None
     ) -> Tuple[int, int]:
         """
         Automatically curate photos from input folder to output folder.
@@ -120,11 +147,13 @@ class PhotoCurator:
             image_size: Image size for processing
             copy_files: If True, copy files; if False, move files
             create_rejected_folder: If True, also create a rejected folder
+            results: Pre-computed results from predict_folder (optional)
 
         Returns:
             Tuple of (num_curated, num_rejected)
         """
-        results = self.predict_folder(input_folder, batch_size, image_size)
+        if results is None:
+            results = self.predict_folder(input_folder, batch_size, image_size)
 
         if not results:
             return 0, 0
@@ -193,6 +222,8 @@ def predict_photos(
     input_folder: str,
     output_folder: Optional[str] = None,
     threshold: float = 0.5,
+    top_n: Optional[int] = None,
+    top_percent: Optional[float] = None,
     backbone: str = 'resnet50',
     batch_size: int = 16,
     copy_files: bool = True,
@@ -206,6 +237,8 @@ def predict_photos(
         input_folder: Path to folder containing images
         output_folder: If provided, curated images will be copied/moved here
         threshold: Probability threshold for curation
+        top_n: If set, select exactly this many top-scoring photos
+        top_percent: If set, select top X% of photos (0-100)
         backbone: Model backbone architecture
         batch_size: Batch size for inference
         copy_files: If True, copy files; if False, move files
@@ -217,7 +250,9 @@ def predict_photos(
     curator = PhotoCurator(
         checkpoint_path=checkpoint_path,
         backbone=backbone,
-        threshold=threshold
+        threshold=threshold,
+        top_n=top_n,
+        top_percent=top_percent
     )
 
     results = curator.predict_folder(input_folder, batch_size)

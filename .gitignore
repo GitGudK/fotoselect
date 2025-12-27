@@ -4,6 +4,9 @@ photos/
 # Model checkpoints
 checkpoints/
 
+# Face data
+face_data/
+
 # Python
 __pycache__/
 *.py[cod]

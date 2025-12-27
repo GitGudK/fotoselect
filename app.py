@@ -84,7 +84,7 @@ def display_image_grid(images: List[Path], cols: int = 4, max_images: int = 20):
 st.sidebar.title("📷 FotoSelect")
 page = st.sidebar.radio(
     "Navigation",
-    ["Home", "Upload Photos", "Train Model", "Auto-Curate", "Gallery"]
+    ["Home", "Upload Photos", "Train Model", "Auto-Curate", "Faces", "Gallery"]
 )
 
 # ============================================================================
@@ -226,6 +226,16 @@ elif page == "Train Model":
     st.markdown("---")
     st.markdown("### Training Settings")
 
+    # Training presets
+    training_preset = st.radio(
+        "Training Duration",
+        ["Quick (10 epochs)", "Standard (30 epochs)", "Extended (100 epochs)", "Custom"],
+        horizontal=True,
+        index=1
+    )
+
+    preset_epochs = {"Quick (10 epochs)": 10, "Standard (30 epochs)": 30, "Extended (100 epochs)": 100}
+
     col1, col2 = st.columns(2)
 
     with col1:
@@ -235,7 +245,11 @@ elif page == "Train Model":
             help="ResNet50 is recommended for best accuracy"
         )
 
-        epochs = st.slider("Training Epochs", 10, 100, 30)
+        if training_preset == "Custom":
+            epochs = st.number_input("Training Epochs", min_value=1, max_value=500, value=50)
+        else:
+            epochs = preset_epochs[training_preset]
+            st.info(f"Training for {epochs} epochs")
 
         batch_size = st.selectbox("Batch Size", [8, 16, 32], index=1)
 
@@ -247,7 +261,8 @@ elif page == "Train Model":
             format_func=lambda x: f"{x:.5f}"
         )
 
-        patience = st.slider("Early Stopping Patience", 3, 20, 10)
+        patience = st.slider("Early Stopping Patience", 3, 50, 10,
+            help="Stop training if no improvement for this many epochs")
 
         freeze_backbone = st.checkbox(
             "Freeze Backbone",
@@ -261,22 +276,38 @@ elif page == "Train Model":
 
         progress_bar = st.progress(0)
         status_text = st.empty()
+        metrics_container = st.empty()
 
         status_text.text("Initializing training...")
 
+        def update_progress(epoch, total_epochs, train_loss, val_loss, train_acc, val_acc):
+            progress = int((epoch / total_epochs) * 100)
+            progress_bar.progress(progress)
+            status_text.text(f"Epoch {epoch}/{total_epochs}")
+            with metrics_container.container():
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Train Loss", f"{train_loss:.4f}")
+                with col2:
+                    st.metric("Val Loss", f"{val_loss:.4f}")
+                with col3:
+                    st.metric("Train Acc", f"{train_acc*100:.1f}%")
+                with col4:
+                    st.metric("Val Acc", f"{val_acc*100:.1f}%")
+
         try:
-            with st.spinner("Training in progress... This may take a while."):
-                history = train_model(
-                    raw_folder=str(RAW_DIR),
-                    curated_folder=str(CURATED_DIR),
-                    output_dir=str(CHECKPOINTS_DIR),
-                    backbone=backbone,
-                    epochs=epochs,
-                    batch_size=batch_size,
-                    learning_rate=learning_rate,
-                    freeze_backbone=freeze_backbone,
-                    early_stopping_patience=patience
-                )
+            history = train_model(
+                raw_folder=str(RAW_DIR),
+                curated_folder=str(CURATED_DIR),
+                output_dir=str(CHECKPOINTS_DIR),
+                backbone=backbone,
+                epochs=epochs,
+                batch_size=batch_size,
+                learning_rate=learning_rate,
+                freeze_backbone=freeze_backbone,
+                early_stopping_patience=patience,
+                progress_callback=update_progress
+            )
 
             progress_bar.progress(100)
             status_text.text("Training complete!")
@@ -311,16 +342,44 @@ elif page == "Auto-Curate":
         st.success(f"Model ready. {input_count} photos pending curation.")
 
         st.markdown("---")
-        st.markdown("### Curation Settings")
+        st.markdown("### Selection Mode")
 
-        threshold = st.slider(
-            "Curation Threshold",
-            0.0, 1.0, 0.5,
-            help="Higher = more selective (fewer photos selected)"
+        selection_mode = st.radio(
+            "How do you want to select photos?",
+            ["Fixed Number", "Percentage", "Score Threshold"],
+            horizontal=True
         )
 
-        col1, col2, col3 = st.columns(3)
-        with col1:
+        # Selection parameters based on mode
+        top_n = None
+        top_percent = None
+        threshold = 0.5
+
+        if selection_mode == "Fixed Number":
+            top_n = st.number_input(
+                "Number of photos to select",
+                min_value=1,
+                max_value=input_count,
+                value=min(10, input_count),
+                help="Select exactly this many top-scoring photos"
+            )
+            st.info(f"Will select the top {top_n} photos out of {input_count}")
+
+        elif selection_mode == "Percentage":
+            top_percent = st.slider(
+                "Percentage of photos to select",
+                1, 100, 25,
+                help="Select the top X% of photos"
+            )
+            num_selected = max(1, int(input_count * top_percent / 100))
+            st.info(f"Will select ~{num_selected} photos ({top_percent}% of {input_count})")
+
+        else:  # Score Threshold
+            threshold = st.slider(
+                "Score Threshold",
+                0.0, 1.0, 0.5,
+                help="Select photos with score above this threshold"
+            )
             if threshold < 0.4:
                 st.info("📈 Permissive - More photos will be selected")
             elif threshold > 0.6:
@@ -330,24 +389,41 @@ elif page == "Auto-Curate":
 
         st.markdown("---")
 
+        # Options
+        col1, col2 = st.columns(2)
+        with col1:
+            clear_output = st.checkbox("Clear output folder first", value=True)
+        with col2:
+            clear_input_after = st.checkbox("Clear input folder after curation", value=False)
+
         if st.button("🎯 Run Auto-Curation", type="primary"):
             from predict import PhotoCurator
 
             with st.spinner("Analyzing photos..."):
                 curator = PhotoCurator(
                     checkpoint_path=str(CHECKPOINTS_DIR / "best.pt"),
-                    threshold=threshold
+                    threshold=threshold,
+                    top_n=top_n,
+                    top_percent=top_percent
                 )
 
                 results = curator.predict_folder(str(INPUT_DIR))
 
-                # Curate to output folder
-                clear_folder(OUTPUT_DIR)
+                # Clear output folder if requested
+                if clear_output:
+                    clear_folder(OUTPUT_DIR)
+
+                # Pass pre-computed results to avoid duplicate processing
                 num_curated, num_rejected = curator.curate_folder(
                     input_folder=str(INPUT_DIR),
                     output_folder=str(OUTPUT_DIR),
-                    copy_files=True
+                    copy_files=True,
+                    results=results
                 )
+
+                # Clear input folder if requested
+                if clear_input_after:
+                    clear_folder(INPUT_DIR)
 
             st.success(f"Curation complete! {num_curated} photos selected, {num_rejected} rejected.")
 
@@ -373,6 +449,220 @@ elif page == "Auto-Curate":
                             st.image(img, caption=f"{photo_path.name}\nScore: {score:.2f}", use_container_width=True)
                         except:
                             pass
+
+# ============================================================================
+# FACES PAGE
+# ============================================================================
+elif page == "Faces":
+    st.title("👤 Face Recognition")
+
+    from faces import FaceManager
+
+    FACE_DATA_DIR = Path("face_data")
+    FACE_DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Initialize face manager in session state
+    if 'face_manager' not in st.session_state:
+        with st.spinner("Loading face recognition models..."):
+            st.session_state.face_manager = FaceManager(data_dir=str(FACE_DATA_DIR))
+
+    fm = st.session_state.face_manager
+
+    tab1, tab2, tab3, tab4 = st.tabs(["Detect Faces", "Cluster & Name", "Find People", "Identify"])
+
+    # ---- TAB 1: Detect Faces ----
+    with tab1:
+        st.markdown("### Detect Faces in Photos")
+        st.markdown("Scan your photos to detect and extract faces for clustering.")
+
+        summary = fm.get_summary()
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Total Faces Detected", summary["total_faces"])
+        with col2:
+            st.metric("Images Processed", summary["total_images"])
+        with col3:
+            st.metric("Clusters Found", summary["total_clusters"])
+
+        st.markdown("---")
+
+        folder_choice = st.selectbox(
+            "Select folder to scan",
+            ["Raw Photos", "Curated Photos", "Input", "Output"],
+            key="face_scan_folder"
+        )
+
+        folder_map = {
+            "Raw Photos": RAW_DIR,
+            "Curated Photos": CURATED_DIR,
+            "Input": INPUT_DIR,
+            "Output": OUTPUT_DIR
+        }
+        scan_folder = folder_map[folder_choice]
+
+        image_count = len(get_image_files(scan_folder))
+        st.info(f"{image_count} images in {folder_choice}")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            clear_existing = st.checkbox("Clear existing face data", value=False)
+        with col2:
+            pass
+
+        if st.button("🔍 Scan for Faces", type="primary", disabled=(image_count == 0)):
+            with st.spinner("Detecting faces... This may take a while."):
+                face_count = fm.process_folder(str(scan_folder), clear_existing=clear_existing)
+            st.success(f"Detected {face_count} faces!")
+            st.rerun()
+
+    # ---- TAB 2: Cluster & Name ----
+    with tab2:
+        st.markdown("### Cluster Faces & Assign Names")
+        st.markdown("Group similar faces together and assign names to identify people.")
+
+        summary = fm.get_summary()
+
+        if summary["total_faces"] == 0:
+            st.warning("No faces detected yet. Please scan photos first.")
+        else:
+            st.markdown("#### Clustering Settings")
+
+            col1, col2 = st.columns(2)
+            with col1:
+                eps = st.slider(
+                    "Clustering Sensitivity",
+                    0.3, 0.8, 0.5,
+                    help="Lower = stricter matching (more clusters), Higher = looser matching (fewer clusters)"
+                )
+            with col2:
+                min_samples = st.slider(
+                    "Minimum Faces per Cluster",
+                    1, 10, 2,
+                    help="Minimum number of face occurrences to form a cluster"
+                )
+
+            if st.button("🔄 Run Clustering"):
+                with st.spinner("Clustering faces..."):
+                    clusters = fm.cluster_faces(eps=eps, min_samples=min_samples)
+                st.success(f"Found {len([c for c in clusters.keys() if c >= 0])} clusters!")
+                st.rerun()
+
+            st.markdown("---")
+            st.markdown("#### Name Clusters")
+
+            if fm.clusters:
+                # Get clusters sorted by size
+                cluster_sizes = [(cid, len(faces)) for cid, faces in fm.clusters.items() if cid >= 0]
+                cluster_sizes.sort(key=lambda x: -x[1])
+
+                for cluster_id, size in cluster_sizes[:20]:  # Show top 20 clusters
+                    with st.expander(f"Cluster {cluster_id} ({size} faces) - {fm.get_cluster_name(cluster_id) or 'Unnamed'}"):
+                        # Show sample faces
+                        sample_images = fm.get_cluster_sample_images(cluster_id, max_samples=5)
+
+                        if sample_images:
+                            cols = st.columns(min(5, len(sample_images)))
+                            for i, face_img in enumerate(sample_images):
+                                with cols[i]:
+                                    st.image(face_img, use_container_width=True)
+
+                        # Name input
+                        current_name = fm.get_cluster_name(cluster_id) or ""
+                        new_name = st.text_input(
+                            "Name this person",
+                            value=current_name,
+                            key=f"name_cluster_{cluster_id}"
+                        )
+
+                        if new_name != current_name:
+                            if st.button(f"Save Name", key=f"save_name_{cluster_id}"):
+                                fm.set_cluster_name(cluster_id, new_name)
+                                st.success(f"Saved: {new_name}")
+                                st.rerun()
+            else:
+                st.info("No clusters yet. Run clustering first.")
+
+    # ---- TAB 3: Find People ----
+    with tab3:
+        st.markdown("### Find Photos by Person")
+
+        people = fm.get_all_people()
+
+        if not people:
+            st.warning("No named people yet. Please name some clusters first.")
+        else:
+            person_options = [f"{name} ({count} photos)" for name, count in people]
+            selected = st.selectbox("Select a person", person_options)
+
+            if selected:
+                person_name = selected.split(" (")[0]
+                photos = fm.get_photos_by_person(person_name)
+
+                st.markdown(f"### Photos of {person_name}")
+                st.info(f"Found {len(photos)} photos")
+
+                if photos:
+                    max_display = st.slider("Max photos to display", 4, 50, 12, key="person_photos_max")
+                    cols_count = st.slider("Columns", 2, 6, 4, key="person_photos_cols")
+
+                    photos_to_show = photos[:max_display]
+                    rows = (len(photos_to_show) + cols_count - 1) // cols_count
+
+                    for row in range(rows):
+                        cols = st.columns(cols_count)
+                        for col in range(cols_count):
+                            idx = row * cols_count + col
+                            if idx < len(photos_to_show):
+                                with cols[col]:
+                                    try:
+                                        img = Image.open(photos_to_show[idx])
+                                        st.image(img, caption=Path(photos_to_show[idx]).name, use_container_width=True)
+                                    except:
+                                        pass
+
+    # ---- TAB 4: Identify ----
+    with tab4:
+        st.markdown("### Identify People in Photos")
+        st.markdown("Upload a photo to identify recognized people in it.")
+
+        if not fm.cluster_names:
+            st.warning("No named people yet. Please name some clusters first.")
+        else:
+            uploaded_file = st.file_uploader(
+                "Upload a photo",
+                type=['jpg', 'jpeg', 'png'],
+                key="identify_upload"
+            )
+
+            threshold = st.slider(
+                "Recognition Threshold",
+                0.3, 0.8, 0.6,
+                help="Lower = more matches but potentially more false positives"
+            )
+
+            if uploaded_file:
+                # Save temporarily
+                temp_path = FACE_DATA_DIR / "temp_identify.jpg"
+                with open(temp_path, "wb") as f:
+                    f.write(uploaded_file.getbuffer())
+
+                # Show original image
+                img = Image.open(temp_path)
+                st.image(img, caption="Uploaded Photo", use_container_width=True)
+
+                if st.button("🔍 Identify Faces"):
+                    with st.spinner("Identifying faces..."):
+                        results = fm.identify_faces(str(temp_path), threshold=threshold)
+
+                    if results:
+                        st.markdown("### Identified People")
+                        for bbox, name, confidence in results:
+                            if name != "Unknown":
+                                st.success(f"**{name}** (confidence: {confidence:.1%})")
+                            else:
+                                st.warning("Unknown person detected")
+                    else:
+                        st.info("No faces detected in this image.")
 
 # ============================================================================
 # GALLERY PAGE

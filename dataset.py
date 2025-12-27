@@ -46,7 +46,16 @@ def find_images(folder: Path) -> List[Path]:
     for ext in ALL_EXTENSIONS:
         images.extend(folder.glob(f'*{ext}'))
         images.extend(folder.glob(f'*{ext.upper()}'))
-    return sorted(images)
+    # Remove duplicates (can occur on case-insensitive filesystems)
+    seen = set()
+    unique_images = []
+    for img in images:
+        # Use resolved path for deduplication
+        key = str(img.resolve())
+        if key not in seen:
+            seen.add(key)
+            unique_images.append(img)
+    return sorted(unique_images)
 
 
 class PhotoCurationDataset(Dataset):

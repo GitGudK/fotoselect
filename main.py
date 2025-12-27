@@ -50,7 +50,15 @@ def cmd_predict(args):
     print(f"{'='*60}")
     print(f"Input folder: {args.input_folder}")
     print(f"Model checkpoint: {args.checkpoint}")
-    print(f"Threshold: {args.threshold}")
+
+    # Show selection mode
+    if args.top_n:
+        print(f"Selection mode: Top {args.top_n} photos")
+    elif args.top_percent:
+        print(f"Selection mode: Top {args.top_percent}%")
+    else:
+        print(f"Selection mode: Threshold {args.threshold}")
+
     if args.output_folder:
         print(f"Output folder: {args.output_folder}")
     print(f"{'='*60}\n")
@@ -60,6 +68,8 @@ def cmd_predict(args):
         input_folder=args.input_folder,
         output_folder=args.output_folder,
         threshold=args.threshold,
+        top_n=args.top_n,
+        top_percent=args.top_percent,
         backbone=args.backbone,
         batch_size=args.batch_size,
         copy_files=not args.move,
@@ -168,6 +178,16 @@ Examples:
         type=float,
         default=0.5,
         help='Probability threshold for curation (default: 0.5)'
+    )
+    predict_parser.add_argument(
+        '--top-n', '-n',
+        type=int,
+        help='Select exactly this many top-scoring photos'
+    )
+    predict_parser.add_argument(
+        '--top-percent', '-p',
+        type=float,
+        help='Select top X%% of photos (e.g., 25 for top 25%%)'
     )
     predict_parser.add_argument(
         '--backbone', '-b',
