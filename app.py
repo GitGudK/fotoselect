@@ -84,7 +84,7 @@ def display_image_grid(images: List[Path], cols: int = 4, max_images: int = 20):
 st.sidebar.title("📷 FotoSelect")
 page = st.sidebar.radio(
     "Navigation",
-    ["Home", "Upload Photos", "Train Model", "Auto-Curate", "Faces", "Gallery"]
+    ["Home", "Photos Import", "Upload Photos", "Train Model", "Auto-Curate", "Faces", "Gallery"]
 )
 
 # ============================================================================
@@ -123,6 +123,240 @@ if page == "Home":
     with col4:
         has_model = (CHECKPOINTS_DIR / "best.pt").exists()
         st.metric("Model Status", "✅ Ready" if has_model else "❌ Not trained")
+
+# ============================================================================
+# PHOTOS IMPORT PAGE
+# ============================================================================
+elif page == "Photos Import":
+    st.title("📸 Photos Library Import")
+
+    st.markdown("""
+    Import photos directly from your macOS Photos library.
+    - **All photos** will be exported to the Raw folder
+    - **Favorited photos** will be exported to the Curated folder
+    - Photos are automatically downsampled for efficient training
+    """)
+
+    st.markdown("---")
+
+    # Check if osxphotos is available
+    try:
+        from photos_import import PhotosLibraryImporter, is_available
+
+        if not is_available():
+            st.error("osxphotos is not installed. Run: `pip install osxphotos`")
+        else:
+            # Initialize importer in session state
+            if 'photos_importer' not in st.session_state:
+                try:
+                    with st.spinner("Loading Photos library..."):
+                        st.session_state.photos_importer = PhotosLibraryImporter()
+                except Exception as e:
+                    st.error(f"Failed to load Photos library: {e}")
+                    st.session_state.photos_importer = None
+
+            importer = st.session_state.photos_importer
+
+            if importer:
+                # Show library info
+                info = importer.get_library_info()
+
+                # Calculate totals
+                available_photos = info["local_photos"] + info["cached_photos"]
+                available_favorites = info["local_favorites"] + info["cached_favorites"]
+                available_pct = (available_photos / info["total_photos"] * 100) if info["total_photos"] > 0 else 0
+
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Total Photos", info["total_photos"])
+                with col2:
+                    st.metric("Available", available_photos, delta=f"{available_pct:.0f}%")
+                with col3:
+                    st.metric("Favorites", info["favorites"])
+                with col4:
+                    st.metric("Albums", info["albums"])
+
+                st.caption(f"Library: {info['library_path']}")
+
+                # Show details about photo availability
+                with st.expander("Photo availability details"):
+                    st.markdown(f"""
+                    **Photos ready to export:**
+                    - 📁 Full resolution (local): {info['local_photos']}
+                    - 🖼️ Cached thumbnails (iCloud): {info['cached_photos']}
+                    - **Total available: {available_photos}**
+
+                    **Favorites:**
+                    - 📁 Full resolution: {info['local_favorites']}
+                    - 🖼️ Cached thumbnails: {info['cached_favorites']}
+                    - **Total available: {available_favorites}** / {info['favorites']}
+
+                    ⚠️ **{info['icloud_only_photos']} photos have no local cache** and will be skipped by quick export.
+
+                    ---
+                    **To download ALL photos from iCloud**, run this in your terminal:
+                    ```bash
+                    cd {Path.cwd()}
+                    python download_icloud.py --max-size 512
+                    ```
+                    This downloads photos from iCloud in batches and saves downsampled versions.
+                    It can be interrupted and resumed (already-exported photos are skipped).
+                    """)
+
+                st.markdown("---")
+                st.markdown("### Export Settings")
+
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    max_size = st.selectbox(
+                        "Image Size (max dimension)",
+                        [256, 512, 768, 1024],
+                        index=1,
+                        help="Larger = better quality but more storage"
+                    )
+
+                    quality = st.slider(
+                        "JPEG Quality",
+                        50, 100, 85,
+                        help="Higher = better quality but larger files"
+                    )
+
+                with col2:
+                    max_raw = st.number_input(
+                        "Max raw photos to export",
+                        min_value=0,
+                        value=0,
+                        help="0 = export all"
+                    )
+                    max_raw = None if max_raw == 0 else int(max_raw)
+
+                    max_curated = st.number_input(
+                        "Max favorited photos to export",
+                        min_value=0,
+                        value=0,
+                        help="0 = export all favorites"
+                    )
+                    max_curated = None if max_curated == 0 else int(max_curated)
+
+                st.markdown("---")
+
+                # Show current folder stats
+                col1, col2 = st.columns(2)
+                with col1:
+                    raw_count = len(get_image_files(RAW_DIR))
+                    st.metric("Current Raw Photos", raw_count)
+                with col2:
+                    curated_count = len(get_image_files(CURATED_DIR))
+                    st.metric("Current Curated Photos", curated_count)
+
+                clear_before = st.checkbox("Clear existing photos before export", value=False)
+
+                st.markdown("---")
+
+                # Export buttons
+                col1, col2, col3 = st.columns(3)
+
+                with col1:
+                    export_all = st.button("📥 Export All Photos", type="primary")
+
+                with col2:
+                    export_favorites = st.button("⭐ Export Favorites Only")
+
+                with col3:
+                    export_both = st.button("📥⭐ Export Both")
+
+                if export_all or export_favorites or export_both:
+                    if clear_before:
+                        if export_all or export_both:
+                            clear_folder(RAW_DIR)
+                        if export_favorites or export_both:
+                            clear_folder(CURATED_DIR)
+
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    stats_container = st.empty()
+
+                    try:
+                        if export_both:
+                            def progress_callback(phase, current, total, filename):
+                                progress = int((current / total) * 100) if total > 0 else 0
+                                progress_bar.progress(progress)
+                                phase_label = "Raw photos" if phase == "raw" else "Favorites"
+                                status_text.text(f"{phase_label}: {current}/{total} - {filename}")
+
+                            with st.spinner("Exporting photos from Photos library..."):
+                                raw_exp, raw_skip, cur_exp, cur_skip = importer.export_all(
+                                    raw_dir=str(RAW_DIR),
+                                    curated_dir=str(CURATED_DIR),
+                                    max_size=max_size,
+                                    quality=quality,
+                                    max_raw=max_raw,
+                                    max_curated=max_curated,
+                                    progress_callback=progress_callback
+                                )
+
+                            progress_bar.progress(100)
+                            status_text.text("Export complete!")
+
+                            with stats_container.container():
+                                col1, col2 = st.columns(2)
+                                with col1:
+                                    st.metric("Raw Photos Exported", raw_exp, delta=f"{raw_skip} skipped")
+                                with col2:
+                                    st.metric("Favorites Exported", cur_exp, delta=f"{cur_skip} skipped")
+
+                            st.success("Photos imported successfully!")
+
+                        elif export_all:
+                            def progress_callback(current, total, filename):
+                                progress = int((current / total) * 100) if total > 0 else 0
+                                progress_bar.progress(progress)
+                                status_text.text(f"Exporting: {current}/{total} - {filename}")
+
+                            with st.spinner("Exporting all photos..."):
+                                exported, skipped = importer.export_photos(
+                                    output_dir=str(RAW_DIR),
+                                    favorites_only=False,
+                                    max_photos=max_raw,
+                                    max_size=max_size,
+                                    quality=quality,
+                                    progress_callback=progress_callback
+                                )
+
+                            progress_bar.progress(100)
+                            status_text.text("Export complete!")
+                            st.success(f"Exported {exported} photos ({skipped} skipped)")
+
+                        elif export_favorites:
+                            def progress_callback(current, total, filename):
+                                progress = int((current / total) * 100) if total > 0 else 0
+                                progress_bar.progress(progress)
+                                status_text.text(f"Exporting: {current}/{total} - {filename}")
+
+                            with st.spinner("Exporting favorite photos..."):
+                                exported, skipped = importer.export_photos(
+                                    output_dir=str(CURATED_DIR),
+                                    favorites_only=True,
+                                    max_photos=max_curated,
+                                    max_size=max_size,
+                                    quality=quality,
+                                    progress_callback=progress_callback,
+                                    download_missing=download_icloud
+                                )
+
+                            progress_bar.progress(100)
+                            status_text.text("Export complete!")
+                            st.success(f"Exported {exported} favorite photos ({skipped} skipped)")
+
+                    except Exception as e:
+                        st.error(f"Export failed: {str(e)}")
+
+    except ImportError:
+        st.error(
+            "The photos_import module is not available.\n\n"
+            "Install osxphotos with: `pip install osxphotos`"
+        )
 
 # ============================================================================
 # UPLOAD PAGE
