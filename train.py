@@ -81,15 +81,21 @@ class Trainer:
         self.best_val_loss = float('inf')
         self.best_val_acc = 0.0
 
-    def train_epoch(self) -> Tuple[float, float]:
+    def train_epoch(
+        self,
+        epoch: int = 1,
+        total_epochs: int = 1,
+        progress_callback=None
+    ) -> Tuple[float, float]:
         """Train for one epoch."""
         self.model.train()
         total_loss = 0.0
         correct = 0
         total = 0
+        total_batches = len(self.train_loader)
 
         pbar = tqdm(self.train_loader, desc='Training')
-        for images, labels in pbar:
+        for batch_idx, (images, labels) in enumerate(pbar, 1):
             images = images.to(self.device)
             labels = labels.float().to(self.device)
 
@@ -114,20 +120,38 @@ class Trainer:
                 'acc': f'{correct/total:.4f}'
             })
 
+            # Call progress callback for batch-level updates
+            if progress_callback:
+                progress_callback(
+                    epoch=epoch,
+                    total_epochs=total_epochs,
+                    batch=batch_idx,
+                    total_batches=total_batches,
+                    phase='train',
+                    batch_loss=loss.item(),
+                    batch_acc=correct/total
+                )
+
         avg_loss = total_loss / total
         accuracy = correct / total
 
         return avg_loss, accuracy
 
     @torch.no_grad()
-    def validate(self) -> Tuple[float, float]:
+    def validate(
+        self,
+        epoch: int = 1,
+        total_epochs: int = 1,
+        progress_callback=None
+    ) -> Tuple[float, float]:
         """Validate the model."""
         self.model.eval()
         total_loss = 0.0
         correct = 0
         total = 0
+        total_batches = len(self.val_loader)
 
-        for images, labels in tqdm(self.val_loader, desc='Validating'):
+        for batch_idx, (images, labels) in enumerate(tqdm(self.val_loader, desc='Validating'), 1):
             images = images.to(self.device)
             labels = labels.float().to(self.device)
 
@@ -138,6 +162,18 @@ class Trainer:
             predictions = (torch.sigmoid(outputs) > 0.5).float()
             correct += (predictions == labels).sum().item()
             total += labels.size(0)
+
+            # Call progress callback for batch-level updates
+            if progress_callback:
+                progress_callback(
+                    epoch=epoch,
+                    total_epochs=total_epochs,
+                    batch=batch_idx,
+                    total_batches=total_batches,
+                    phase='val',
+                    batch_loss=loss.item(),
+                    batch_acc=correct/total
+                )
 
         avg_loss = total_loss / total
         accuracy = correct / total
@@ -177,22 +213,38 @@ class Trainer:
         Args:
             epochs: Number of training epochs
             early_stopping_patience: Epochs to wait before early stopping
-            progress_callback: Optional callback function(epoch, epochs, train_loss, val_loss, train_acc, val_acc)
+            progress_callback: Optional callback function with kwargs:
+                - epoch: current epoch (1-indexed)
+                - total_epochs: total epochs
+                - batch: current batch in epoch (1-indexed)
+                - total_batches: total batches per epoch
+                - phase: 'train' or 'val'
+                - train_loss, val_loss, train_acc, val_acc: metrics (available after each phase)
         """
         print(f"\nStarting training for {epochs} epochs...")
         print(f"Model parameters: {self.model.get_num_params():,} trainable\n")
 
         patience_counter = 0
+        total_train_batches = len(self.train_loader)
+        total_val_batches = len(self.val_loader)
 
         for epoch in range(1, epochs + 1):
             print(f"\nEpoch {epoch}/{epochs}")
             print("-" * 40)
 
-            # Train
-            train_loss, train_acc = self.train_epoch()
+            # Train with batch-level progress
+            train_loss, train_acc = self.train_epoch(
+                epoch=epoch,
+                total_epochs=epochs,
+                progress_callback=progress_callback
+            )
 
-            # Validate
-            val_loss, val_acc = self.validate()
+            # Validate with batch-level progress
+            val_loss, val_acc = self.validate(
+                epoch=epoch,
+                total_epochs=epochs,
+                progress_callback=progress_callback
+            )
 
             # Update learning rate
             self.scheduler.step(val_loss)
@@ -221,11 +273,14 @@ class Trainer:
             # Save checkpoint
             self.save_checkpoint(epoch, is_best)
 
-            # Call progress callback if provided
+            # Call progress callback with epoch-end summary
             if progress_callback:
                 progress_callback(
                     epoch=epoch,
                     total_epochs=epochs,
+                    batch=None,  # Indicates epoch end
+                    total_batches=None,
+                    phase='epoch_end',
                     train_loss=train_loss,
                     val_loss=val_loss,
                     train_acc=train_acc,

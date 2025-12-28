@@ -91,29 +91,52 @@ def export_and_downsample(
     quality: int,
     favorites_only: bool = False,
     max_photos: int = None,
-    timeout: int = 300
+    timeout: int = 300,
+    force_reexport: bool = False
 ) -> tuple[int, int, int]:
     """
     Export photos using osxphotos CLI and downsample them.
 
+    Uses a staging directory for osxphotos export to avoid conflicts with
+    our downsampled JPGs, then processes new files into the output directory.
+
+    Args:
+        force_reexport: If True, clear staging directory and osxphotos database
+                       to force re-export of all photos
+
     Returns (success, skipped, failed) counts.
     """
+    import shutil
+
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Load tracking of already-downsampled files
     already_downsampled = load_tracking(output_dir)
 
-    # Build osxphotos export command
+    # Use a staging directory for osxphotos export
+    # This prevents --update from matching our downsampled JPGs
+    staging_dir = output_dir / ".staging"
+
+    # If force_reexport, clear the staging directory completely
+    # This removes osxphotos' .osxphotos_export.db database
+    if force_reexport and staging_dir.exists():
+        print("Clearing staging directory for fresh export...")
+        shutil.rmtree(staging_dir)
+
+    staging_dir.mkdir(parents=True, exist_ok=True)
+
+    # Build osxphotos export command - export to staging dir
+    # Use --update to only export new photos (tracked in staging dir's database)
     cmd = [
         str(OSXPHOTOS_PATH), "export",
-        str(output_dir),
+        str(staging_dir),
         "--download-missing",  # Download from iCloud if needed
-        "--skip-edited",
-        "--skip-live",
+        "--only-photos",  # Skip movies/videos, only export images
         "--skip-raw",
         "--skip-bursts",
+        "--skip-live",  # Skip live photo movie files (keep still image)
         "--update",  # Only export new/changed photos
-        # Note: Don't use --cleanup as it removes our downsampled files
+        # Edited photos are included
     ]
 
     if favorites_only:
@@ -144,7 +167,7 @@ def export_and_downsample(
         print(f"Export error: {e}")
         return 0, 0, 1
 
-    # Now downsample all exported images
+    # Now downsample all exported images from staging to output
     print()
     print("Downsampling exported photos...")
 
@@ -154,7 +177,7 @@ def export_and_downsample(
 
     image_extensions = {'.jpg', '.jpeg', '.heic', '.png', '.tiff', '.dng', '.gif', '.bmp'}
 
-    for f in sorted(output_dir.iterdir()):
+    for f in sorted(staging_dir.iterdir()):
         if not f.is_file():
             continue
         if f.suffix.lower() not in image_extensions:
@@ -165,17 +188,17 @@ def export_and_downsample(
         # Check if already downsampled using tracking file
         output_name = f.stem + '.jpg'
         if output_name in already_downsampled:
+            # Already processed - remove from staging
+            f.unlink()
             skipped += 1
             continue
 
-        # Create temp file for downsampled version
-        temp_path = f.with_suffix('.tmp.jpg')
+        # Downsample directly to output directory
+        final_path = output_dir / output_name
 
-        if downsample_image(f, temp_path, max_size, quality):
-            # Replace original with downsampled version
+        if downsample_image(f, final_path, max_size, quality):
+            # Remove original from staging
             f.unlink()
-            final_path = f.with_suffix('.jpg')
-            temp_path.rename(final_path)
 
             # Track this file as downsampled
             already_downsampled.add(final_path.name)
@@ -183,14 +206,37 @@ def export_and_downsample(
             success += 1
             print(f"  Downsampled: {f.name}")
         else:
-            if temp_path.exists():
-                temp_path.unlink()
+            # Keep failed file in staging for debugging
             failed += 1
 
     # Save tracking file
     save_tracking(output_dir, already_downsampled)
 
     return success, skipped, failed
+
+
+def sync_tracking_with_folder(output_dir: Path):
+    """
+    Sync the tracking file with actual files in the folder.
+    Removes entries for files that no longer exist and adds entries for
+    existing .jpg files (assumed to be already downsampled).
+    """
+    # Get all jpg files currently in the folder
+    actual_files = {f.name for f in output_dir.iterdir()
+                    if f.is_file() and f.suffix.lower() == '.jpg' and not f.name.startswith('.')}
+
+    # Load current tracking
+    tracked = load_tracking(output_dir)
+
+    # Sync: tracked files should match actual files
+    old_count = len(tracked)
+    tracked = tracked & actual_files  # Remove entries for deleted files
+    tracked = tracked | actual_files  # Add entries for existing jpg files
+
+    save_tracking(output_dir, tracked)
+
+    added = len(tracked) - old_count
+    print(f"Synced tracking: {len(tracked)} files tracked ({added:+d} change)")
 
 
 def main():
@@ -237,8 +283,12 @@ def main():
             quality=args.quality,
             favorites_only=True,
             max_photos=args.max_photos,
-            timeout=args.timeout
+            timeout=args.timeout,
+            force_reexport=args.reset
         )
+
+        # Sync tracking with actual files
+        sync_tracking_with_folder(curated_dir)
 
         print()
         print(f"Done! Downsampled: {success}, Skipped: {skipped}, Failed: {failed}")
@@ -253,8 +303,12 @@ def main():
             quality=args.quality,
             favorites_only=False,
             max_photos=args.max_photos,
-            timeout=args.timeout
+            timeout=args.timeout,
+            force_reexport=args.reset
         )
+
+        # Sync tracking with actual files
+        sync_tracking_with_folder(raw_dir)
 
         print()
         print(f"Raw: Downsampled: {raw_success}, Skipped: {raw_skipped}, Failed: {raw_failed}")
@@ -270,8 +324,12 @@ def main():
             quality=args.quality,
             favorites_only=True,
             max_photos=None,  # All favorites
-            timeout=args.timeout
+            timeout=args.timeout,
+            force_reexport=args.reset
         )
+
+        # Sync tracking with actual files
+        sync_tracking_with_folder(curated_dir)
 
         print()
         print(f"Curated: Downsampled: {curated_success}, Skipped: {curated_skipped}, Failed: {curated_failed}")

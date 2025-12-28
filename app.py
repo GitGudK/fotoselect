@@ -55,11 +55,25 @@ def save_uploaded_files(uploaded_files, destination: Path) -> int:
     return count
 
 
-def clear_folder(folder: Path):
-    """Remove all files from a folder."""
+def clear_folder(folder: Path, clear_staging: bool = True):
+    """Remove all files from a folder and optionally clear staging directory."""
+    import shutil
+
     for f in folder.iterdir():
         if f.is_file():
             f.unlink()
+
+    # Also clear the staging directory used by osxphotos export
+    # This removes the .osxphotos_export.db database so exports start fresh
+    if clear_staging:
+        staging_dir = folder / ".staging"
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir)
+
+        # Also clear the tracking file
+        tracking_file = folder / ".downsampled.json"
+        if tracking_file.exists():
+            tracking_file.unlink()
 
 
 def display_image_grid(images: List[Path], cols: int = 4, max_images: int = 20):
@@ -251,6 +265,37 @@ elif page == "Photos Import":
                     st.metric("Current Curated Photos", curated_count)
 
                 clear_before = st.checkbox("Clear existing photos before export", value=False)
+
+                # Tracking file management
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("🔄 Sync Download Tracking", help="Sync tracking with existing files - next export will only download missing photos"):
+                        from download_icloud import sync_tracking_with_folder
+                        synced = []
+                        if RAW_DIR.exists():
+                            sync_tracking_with_folder(RAW_DIR)
+                            synced.append("raw")
+                        if CURATED_DIR.exists():
+                            sync_tracking_with_folder(CURATED_DIR)
+                            synced.append("curated")
+                        if synced:
+                            st.success(f"Synced tracking for: {', '.join(synced)}")
+                        else:
+                            st.info("No photo folders found")
+                with col2:
+                    if st.button("🗑️ Clear All & Start Over", type="secondary", help="Delete all exported photos and tracking data"):
+                        cleared = []
+                        if RAW_DIR.exists():
+                            clear_folder(RAW_DIR)
+                            cleared.append(f"raw ({raw_count} files)")
+                        if CURATED_DIR.exists():
+                            clear_folder(CURATED_DIR)
+                            cleared.append(f"curated ({curated_count} files)")
+                        if cleared:
+                            st.success(f"Cleared: {', '.join(cleared)}")
+                            st.rerun()
+                        else:
+                            st.info("No photo folders to clear")
 
                 st.markdown("---")
 
@@ -514,20 +559,52 @@ elif page == "Train Model":
 
         status_text.text("Initializing training...")
 
-        def update_progress(epoch, total_epochs, train_loss, val_loss, train_acc, val_acc):
-            progress = int((epoch / total_epochs) * 100)
-            progress_bar.progress(progress)
-            status_text.text(f"Epoch {epoch}/{total_epochs}")
+        # Track metrics across callbacks
+        current_metrics = {'train_loss': 0, 'val_loss': 0, 'train_acc': 0, 'val_acc': 0}
+
+        def update_progress(epoch, total_epochs, batch=None, total_batches=None,
+                          phase='train', train_loss=None, val_loss=None,
+                          train_acc=None, val_acc=None, batch_loss=None, batch_acc=None):
+            # Calculate precise progress
+            if phase == 'epoch_end':
+                # End of epoch - update metrics
+                current_metrics['train_loss'] = train_loss
+                current_metrics['val_loss'] = val_loss
+                current_metrics['train_acc'] = train_acc
+                current_metrics['val_acc'] = val_acc
+                progress = int((epoch / total_epochs) * 100)
+                status_text.text(f"Epoch {epoch}/{total_epochs} complete")
+            elif batch is not None and total_batches is not None:
+                # Batch-level progress: each epoch has train + val phases
+                # Train phase = first half of epoch, val phase = second half
+                epoch_progress = (epoch - 1) / total_epochs
+                if phase == 'train':
+                    batch_progress = (batch / total_batches) * 0.8  # Training is ~80% of epoch
+                    phase_text = "Training"
+                    current_metrics['train_loss'] = batch_loss or current_metrics['train_loss']
+                    current_metrics['train_acc'] = batch_acc or current_metrics['train_acc']
+                else:  # val
+                    batch_progress = 0.8 + (batch / total_batches) * 0.2  # Validation is ~20%
+                    phase_text = "Validating"
+
+                progress = int((epoch_progress + batch_progress / total_epochs) * 100)
+                status_text.text(f"Epoch {epoch}/{total_epochs} - {phase_text} batch {batch}/{total_batches}")
+            else:
+                progress = 0
+
+            progress_bar.progress(min(progress, 100))
+
+            # Update metrics display
             with metrics_container.container():
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
-                    st.metric("Train Loss", f"{train_loss:.4f}")
+                    st.metric("Train Loss", f"{current_metrics['train_loss']:.4f}")
                 with col2:
-                    st.metric("Val Loss", f"{val_loss:.4f}")
+                    st.metric("Val Loss", f"{current_metrics['val_loss']:.4f}")
                 with col3:
-                    st.metric("Train Acc", f"{train_acc*100:.1f}%")
+                    st.metric("Train Acc", f"{current_metrics['train_acc']*100:.1f}%")
                 with col4:
-                    st.metric("Val Acc", f"{val_acc*100:.1f}%")
+                    st.metric("Val Acc", f"{current_metrics['val_acc']*100:.1f}%")
 
         try:
             history = train_model(

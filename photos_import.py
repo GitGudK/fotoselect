@@ -157,17 +157,10 @@ class PhotosLibraryImporter:
         return output.getvalue()
 
     def _get_photo_filename(self, photo) -> str:
-        """Generate a unique filename for a photo."""
-        # Use original filename
-        original = photo.original_filename
-        if original:
-            base = Path(original).stem
-            return f"{base}.jpg"
-
-        # Fallback to date-based name
-        date = photo.date or datetime.now()
-        date_str = date.strftime("%Y%m%d_%H%M%S")
-        return f"IMG_{date_str}_{photo.uuid[:8]}.jpg"
+        """Generate a unique filename for a photo using UUID."""
+        # Always use UUID to ensure uniqueness (many photos have same original filename)
+        # Use first 8 chars of UUID which is enough for uniqueness
+        return f"{photo.uuid[:8]}.jpg"
 
     def export_photos(
         self,
