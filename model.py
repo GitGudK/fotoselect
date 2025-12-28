@@ -87,6 +87,10 @@ class PhotoCurationCNN(nn.Module):
         logits = self.classifier(features)
         return logits.squeeze(-1)
 
+    def extract_features(self, x: torch.Tensor) -> torch.Tensor:
+        """Extract feature embeddings from the backbone (before classifier)."""
+        return self.backbone(x)
+
     def predict_proba(self, x: torch.Tensor) -> torch.Tensor:
         """Return probability of being curated (class 1)."""
         logits = self.forward(x)

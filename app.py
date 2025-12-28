@@ -699,6 +699,24 @@ elif page == "Auto-Curate":
                 st.info("⚖️ Balanced - Moderate selection")
 
         st.markdown("---")
+        st.markdown("### Deduplication")
+
+        deduplicate = st.checkbox(
+            "Remove similar/duplicate photos",
+            value=True,
+            help="Compare selected photos and replace duplicates with different ones"
+        )
+
+        if deduplicate:
+            similarity_threshold = st.slider(
+                "Similarity threshold",
+                0.80, 0.99, 0.92,
+                help="Higher = only remove very similar photos, Lower = remove more similar photos"
+            )
+        else:
+            similarity_threshold = 0.92
+
+        st.markdown("---")
 
         # Options
         col1, col2 = st.columns(2)
@@ -715,7 +733,9 @@ elif page == "Auto-Curate":
                     checkpoint_path=str(CHECKPOINTS_DIR / "best.pt"),
                     threshold=threshold,
                     top_n=top_n,
-                    top_percent=top_percent
+                    top_percent=top_percent,
+                    deduplicate=deduplicate,
+                    similarity_threshold=similarity_threshold
                 )
 
                 results = curator.predict_folder(str(INPUT_DIR))
