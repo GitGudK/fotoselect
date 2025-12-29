@@ -1033,6 +1033,7 @@ elif page == "Auto-Curate":
 
                     filtered_paths = curator.filter_photos_by_pool(
                         all_image_paths,
+                        folder=SOURCE_DIR,
                         max_photos=int(pool_max_photos) if pool_max_photos else None,
                         percentage=pool_percentage,
                         date_from=pool_date_from,

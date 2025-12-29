@@ -130,11 +130,24 @@ class PhotosLibraryImporter:
         img = Image.open(image_path)
 
         # Try to get EXIF data before any conversions
+        # Use multiple methods since different formats store EXIF differently
         exif_data = None
         try:
+            # First try img.info['exif'] (works for JPEG)
             exif_data = img.info.get('exif')
         except Exception:
             pass
+
+        if exif_data is None:
+            # Try getexif() and convert to bytes (works for HEIC and others)
+            try:
+                exif_obj = img.getexif()
+                if exif_obj:
+                    exif_bytes = io.BytesIO()
+                    exif_obj.save(exif_bytes)
+                    exif_data = exif_bytes.getvalue()
+            except Exception:
+                pass
 
         # Convert to RGB if necessary
         if img.mode not in ('RGB', 'L'):

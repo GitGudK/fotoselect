@@ -93,6 +93,7 @@ class PhotoCurator:
 
         Returns datetime or None if date cannot be determined.
         """
+        # Method 1: Try PIL _getexif()
         try:
             img = Image.open(image_path)
             exif = img._getexif()
@@ -117,6 +118,21 @@ class PhotoCurator:
                 pass
 
         return None
+
+    def get_photo_dates_batch(self, folder: Path, image_paths: List[str], progress_callback: Optional[callable] = None) -> Dict[str, Optional[datetime]]:
+        """
+        Extract dates from multiple photos using cached date database.
+
+        Args:
+            folder: The folder containing images (for cache location)
+            image_paths: List of image file paths
+            progress_callback: Optional callback(current, total, phase)
+
+        Returns:
+            Dict mapping image path to datetime (or None if no date)
+        """
+        from date_cache import get_photo_dates
+        return get_photo_dates(folder, image_paths, progress_callback)
 
     def get_time_group_key(self, dt: datetime) -> str:
         """Get the grouping key for a datetime based on time_grouping setting."""
@@ -212,6 +228,7 @@ class PhotoCurator:
     def filter_photos_by_pool(
         self,
         image_paths: List[str],
+        folder: Optional[Path] = None,
         max_photos: Optional[int] = None,
         percentage: Optional[float] = None,
         date_from: Optional[datetime] = None,
@@ -223,6 +240,7 @@ class PhotoCurator:
 
         Args:
             image_paths: List of image file paths
+            folder: Folder containing images (for date cache)
             max_photos: Maximum number of photos to include
             percentage: Percentage of photos to include (0-100)
             date_from: Only include photos taken on or after this date
@@ -237,12 +255,18 @@ class PhotoCurator:
         filtered = list(image_paths)
 
         # Apply date filter first (most restrictive typically)
-        # Use use_mtime_fallback=False to only match photos with actual EXIF dates
+        # Use batch date extraction for efficiency
         if date_from or date_to:
+            # Determine folder from first image path if not provided
+            if folder is None and filtered:
+                folder = Path(filtered[0]).parent
+
+            print(f"Extracting dates from {len(filtered)} photos...")
+            date_map = self.get_photo_dates_batch(folder, filtered, progress_callback)
+
             date_filtered = []
-            total = len(filtered)
-            for i, path in enumerate(filtered):
-                dt = self.get_photo_date(path, use_mtime_fallback=False)
+            for path in filtered:
+                dt = date_map.get(path)
                 if dt:
                     if date_from and dt < date_from:
                         continue
@@ -250,9 +274,6 @@ class PhotoCurator:
                         continue
                     date_filtered.append(path)
                 # Photos without readable dates are excluded when date filtering is active
-
-                if progress_callback and (i + 1) % 50 == 0:
-                    progress_callback(i + 1, total, 'filtering')
 
             print(f"Date filter: {len(filtered)} -> {len(date_filtered)} photos")
             filtered = date_filtered
@@ -326,6 +347,7 @@ class PhotoCurator:
                 print(f"\nFiltering photo pool from {len(all_image_paths)} photos...")
                 filtered_paths = self.filter_photos_by_pool(
                     all_image_paths,
+                    folder=Path(input_folder),
                     max_photos=max_photos,
                     percentage=percentage,
                     date_from=date_from,

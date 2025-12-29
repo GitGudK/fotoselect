@@ -59,11 +59,25 @@ def downsample_image(image_path: Path, output_path: Path, max_size: int = 512, q
         img = Image.open(image_path)
 
         # Try to get EXIF data before any conversions
+        # Use multiple methods since different formats store EXIF differently
         exif_data = None
         try:
+            # First try img.info['exif'] (works for JPEG)
             exif_data = img.info.get('exif')
         except Exception:
             pass
+
+        if exif_data is None:
+            # Try getexif() and convert to bytes (works for HEIC and others)
+            try:
+                exif_obj = img.getexif()
+                if exif_obj:
+                    import io
+                    exif_bytes = io.BytesIO()
+                    exif_obj.save(exif_bytes)
+                    exif_data = exif_bytes.getvalue()
+            except Exception:
+                pass
 
         if img.mode not in ('RGB', 'L'):
             img = img.convert('RGB')
@@ -147,6 +161,7 @@ def export_and_downsample(
         "--skip-bursts",
         "--skip-live",  # Skip live photo movie files (keep still image)
         "--update",  # Only export new/changed photos
+        "--exiftool",  # Write Photos date metadata to EXIF (requires exiftool)
         # Edited photos are included
     ]
 
