@@ -7,6 +7,7 @@ tqdm>=4.65.0
 scikit-learn>=1.3.0
 rawpy>=0.19.0
 imageio>=2.31.0
+imagehash>=4.3.0  # Perceptual hashing for duplicate detection
 streamlit>=1.28.0
 facenet-pytorch>=2.5.3
 osxphotos>=0.68.0  # macOS only - for Photos library access

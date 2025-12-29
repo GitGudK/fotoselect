@@ -710,11 +710,11 @@ elif page == "Auto-Curate":
         if deduplicate:
             similarity_threshold = st.slider(
                 "Similarity threshold",
-                0.80, 0.99, 0.92,
-                help="Higher = only remove very similar photos, Lower = remove more similar photos"
+                0.0, 1.0, 0.75,
+                help="Higher = only remove very similar photos, Lower = more aggressive deduplication"
             )
         else:
-            similarity_threshold = 0.92
+            similarity_threshold = 0.75
 
         st.markdown("---")
 
@@ -728,34 +728,59 @@ elif page == "Auto-Curate":
         if st.button("🎯 Run Auto-Curation", type="primary"):
             from predict import PhotoCurator
 
-            with st.spinner("Analyzing photos..."):
-                curator = PhotoCurator(
-                    checkpoint_path=str(CHECKPOINTS_DIR / "best.pt"),
-                    threshold=threshold,
-                    top_n=top_n,
-                    top_percent=top_percent,
-                    deduplicate=deduplicate,
-                    similarity_threshold=similarity_threshold
-                )
+            progress_bar = st.progress(0)
+            status_text = st.empty()
 
-                results = curator.predict_folder(str(INPUT_DIR))
+            curator = PhotoCurator(
+                checkpoint_path=str(CHECKPOINTS_DIR / "best.pt"),
+                threshold=threshold,
+                top_n=top_n,
+                top_percent=top_percent,
+                deduplicate=deduplicate,
+                similarity_threshold=similarity_threshold
+            )
 
-                # Clear output folder if requested
-                if clear_output:
-                    clear_folder(OUTPUT_DIR)
+            def update_progress(current, total, phase):
+                if phase == 'scoring':
+                    # Scoring is 0-50% (or 0-100% if no dedup)
+                    max_pct = 50 if deduplicate else 100
+                    pct = int((current / total) * max_pct)
+                    status_text.text(f"Scoring photos: {current}/{total} batches")
+                elif phase == 'features':
+                    # Feature extraction is 50-75%
+                    pct = 50 + int((current / total) * 25)
+                    status_text.text(f"Extracting features: {current}/{total} batches")
+                elif phase == 'dedup':
+                    # Deduplication is 75-100%
+                    pct = 75 + int((current / total) * 25)
+                    status_text.text(f"Deduplicating: {current}/{total} photos")
+                else:
+                    pct = 0
+                progress_bar.progress(min(pct, 100))
 
-                # Pass pre-computed results to avoid duplicate processing
-                num_curated, num_rejected = curator.curate_folder(
-                    input_folder=str(INPUT_DIR),
-                    output_folder=str(OUTPUT_DIR),
-                    copy_files=True,
-                    results=results
-                )
+            status_text.text("Loading model...")
+            results = curator.predict_folder(str(INPUT_DIR), progress_callback=update_progress)
 
-                # Clear input folder if requested
-                if clear_input_after:
-                    clear_folder(INPUT_DIR)
+            progress_bar.progress(100)
+            status_text.text("Organizing files...")
 
+            # Clear output folder if requested
+            if clear_output:
+                clear_folder(OUTPUT_DIR)
+
+            # Pass pre-computed results to avoid duplicate processing
+            num_curated, num_rejected = curator.curate_folder(
+                input_folder=str(INPUT_DIR),
+                output_folder=str(OUTPUT_DIR),
+                copy_files=True,
+                results=results
+            )
+
+            # Clear input folder if requested
+            if clear_input_after:
+                clear_folder(INPUT_DIR)
+
+            status_text.empty()
             st.success(f"Curation complete! {num_curated} photos selected, {num_rejected} rejected.")
 
             # Show results

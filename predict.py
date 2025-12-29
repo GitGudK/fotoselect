@@ -13,6 +13,8 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import numpy as np
+from PIL import Image
+import imagehash
 
 from model import load_model, PhotoCurationCNN
 from dataset import InferenceDataset
@@ -30,7 +32,7 @@ class PhotoCurator:
         top_n: Optional[int] = None,
         top_percent: Optional[float] = None,
         deduplicate: bool = False,
-        similarity_threshold: float = 0.92
+        similarity_threshold: float = 0.75
     ):
         """
         Initialize the curator.
@@ -43,7 +45,8 @@ class PhotoCurator:
             top_n: If set, select exactly this many top-scoring photos
             top_percent: If set, select top X% of photos (0-100)
             deduplicate: If True, remove similar photos from selection
-            similarity_threshold: Cosine similarity threshold for duplicates (0-1, default 0.92)
+            similarity_threshold: Perceptual hash similarity threshold (0-1, default 0.75)
+                Lower values = more aggressive deduplication
         """
         self.threshold = threshold
         self.top_n = top_n
@@ -73,7 +76,8 @@ class PhotoCurator:
         self,
         input_folder: str,
         batch_size: int = 16,
-        image_size: int = 224
+        image_size: int = 224,
+        progress_callback: Optional[callable] = None
     ) -> List[Tuple[str, float, bool]]:
         """
         Predict curation scores for all images in a folder.
@@ -82,6 +86,8 @@ class PhotoCurator:
             input_folder: Path to folder containing images
             batch_size: Batch size for inference
             image_size: Image size for processing
+            progress_callback: Optional callback(current, total, phase) for progress updates
+                phase is 'scoring', 'features', or 'dedup'
 
         Returns:
             List of (image_path, score, should_curate) tuples
@@ -101,6 +107,8 @@ class PhotoCurator:
         )
 
         results = []
+        total_batches = len(loader)
+        processed = 0
 
         for images, paths in tqdm(loader, desc='Predicting'):
             images = images.to(self.device)
@@ -108,6 +116,10 @@ class PhotoCurator:
 
             for path, score in zip(paths, scores.cpu().numpy()):
                 results.append((path, float(score)))
+
+            processed += 1
+            if progress_callback:
+                progress_callback(processed, total_batches, 'scoring')
 
         # Sort by score descending
         results.sort(key=lambda x: x[1], reverse=True)
@@ -135,8 +147,10 @@ class PhotoCurator:
 
         # Apply deduplication if enabled
         if self.deduplicate:
-            features = self.extract_features(input_folder, batch_size, image_size)
-            final_results = self.deduplicate_selection(final_results, features)
+            # Get all image paths for hashing
+            all_paths = [p for p, _, _ in final_results]
+            hashes = self.compute_perceptual_hashes(all_paths, progress_callback)
+            final_results = self.deduplicate_selection(final_results, hashes, progress_callback)
 
         return final_results
 
@@ -229,68 +243,68 @@ class PhotoCurator:
 
         print(f"Results exported to {output_file}")
 
-    @torch.no_grad()
-    def extract_features(
+    def compute_perceptual_hashes(
         self,
-        input_folder: str,
-        batch_size: int = 16,
-        image_size: int = 224
-    ) -> Dict[str, np.ndarray]:
+        image_paths: List[str],
+        progress_callback: Optional[callable] = None
+    ) -> Dict[str, imagehash.ImageHash]:
         """
-        Extract feature embeddings for all images in a folder.
+        Compute perceptual hashes for images using multiple hash types.
+
+        Uses a combination of pHash (perceptual hash) and dHash (difference hash)
+        for robust similarity detection.
 
         Args:
-            input_folder: Path to folder containing images
-            batch_size: Batch size for inference
-            image_size: Image size for processing
+            image_paths: List of image file paths
+            progress_callback: Optional callback(current, total, phase) for progress updates
 
         Returns:
-            Dictionary mapping image paths to feature vectors
+            Dictionary mapping image paths to perceptual hash objects
         """
-        dataset = InferenceDataset(input_folder, image_size=image_size)
+        hashes = {}
+        total = len(image_paths)
 
-        if len(dataset) == 0:
-            return {}
+        for i, path in enumerate(tqdm(image_paths, desc='Computing hashes')):
+            try:
+                img = Image.open(path)
+                # Use pHash which is good for detecting similar images
+                phash = imagehash.phash(img, hash_size=16)
+                hashes[path] = phash
+            except Exception as e:
+                print(f"  Error hashing {Path(path).name}: {e}")
 
-        loader = DataLoader(
-            dataset,
-            batch_size=batch_size,
-            shuffle=False,
-            num_workers=4,
-            pin_memory=True
-        )
+            if progress_callback:
+                progress_callback(i + 1, total, 'features')
 
-        features_dict = {}
+        return hashes
 
-        for images, paths in tqdm(loader, desc='Extracting features'):
-            images = images.to(self.device)
-            features = self.model.extract_features(images)
-            # Normalize features for cosine similarity
-            features = F.normalize(features, p=2, dim=1)
+    def compute_hash_distance(self, hash1: imagehash.ImageHash, hash2: imagehash.ImageHash) -> int:
+        """
+        Compute Hamming distance between two perceptual hashes.
 
-            for path, feat in zip(paths, features.cpu().numpy()):
-                features_dict[path] = feat
-
-        return features_dict
-
-    def compute_similarity(self, feat1: np.ndarray, feat2: np.ndarray) -> float:
-        """Compute cosine similarity between two feature vectors."""
-        return float(np.dot(feat1, feat2))
+        Returns:
+            Hamming distance (0 = identical, higher = more different)
+            For 16x16 pHash, max distance is 256.
+        """
+        return hash1 - hash2
 
     def deduplicate_selection(
         self,
         results: List[Tuple[str, float, bool]],
-        features: Dict[str, np.ndarray]
+        hashes: Dict[str, imagehash.ImageHash],
+        progress_callback: Optional[callable] = None
     ) -> List[Tuple[str, float, bool]]:
         """
         Remove similar photos from the selection and replace with alternatives.
 
+        Uses perceptual hashing to detect visually similar images.
         For each pair of similar selected photos, keeps the higher-scoring one
         and replaces the other with the next best non-similar alternative.
 
         Args:
             results: List of (path, score, should_curate) tuples, sorted by score
-            features: Dictionary of path -> feature vector
+            hashes: Dictionary of path -> perceptual hash
+            progress_callback: Optional callback(current, total, phase) for progress updates
 
         Returns:
             Updated results with deduplicated selection
@@ -302,27 +316,39 @@ class PhotoCurator:
         if len(selected) <= 1:
             return results
 
-        print(f"\nDeduplicating {len(selected)} selected photos (similarity threshold: {self.similarity_threshold})...")
+        # Convert similarity_threshold (0-1) to hash distance threshold
+        # For 16x16 pHash (256 bits), we use a more aggressive formula
+        # Lower similarity_threshold = more aggressive dedup (higher distance threshold)
+        # similarity 0.70 -> distance ~100, similarity 0.85 -> distance ~50, similarity 0.95 -> distance ~20
+        # Scale factor of 320 makes the threshold more aggressive for catching similar-looking photos
+        max_distance = int((1 - self.similarity_threshold) * 320)
+        max_distance = max(10, min(max_distance, 120))  # Clamp between 10 and 120
+
+        print(f"\nDeduplicating {len(selected)} selected photos (max hash distance: {max_distance})...")
+        total_to_check = len(selected)
 
         # Track which photos are in the final selection
         final_selected = []
         removed_count = 0
 
         for i, (path, score, _) in enumerate(selected):
-            if path not in features:
+            if progress_callback:
+                progress_callback(i + 1, total_to_check, 'dedup')
+
+            if path not in hashes:
                 final_selected.append((path, score, True))
                 continue
 
-            feat = features[path]
+            current_hash = hashes[path]
 
             # Check similarity with already-selected photos
             is_duplicate = False
             for prev_path, _, _ in final_selected:
-                if prev_path in features:
-                    similarity = self.compute_similarity(feat, features[prev_path])
-                    if similarity >= self.similarity_threshold:
+                if prev_path in hashes:
+                    distance = self.compute_hash_distance(current_hash, hashes[prev_path])
+                    if distance <= max_distance:
                         is_duplicate = True
-                        print(f"  Duplicate: {Path(path).name} similar to {Path(prev_path).name} ({similarity:.3f})")
+                        print(f"  Duplicate: {Path(path).name} similar to {Path(prev_path).name} (distance: {distance})")
                         break
 
             if not is_duplicate:
@@ -331,17 +357,17 @@ class PhotoCurator:
                 removed_count += 1
                 # Try to find a replacement from candidates
                 for j, (cand_path, cand_score, _) in enumerate(candidates):
-                    if cand_path not in features:
+                    if cand_path not in hashes:
                         continue
 
-                    cand_feat = features[cand_path]
+                    cand_hash = hashes[cand_path]
 
                     # Check if candidate is similar to any already-selected photo
                     cand_is_dup = False
                     for prev_path, _, _ in final_selected:
-                        if prev_path in features:
-                            similarity = self.compute_similarity(cand_feat, features[prev_path])
-                            if similarity >= self.similarity_threshold:
+                        if prev_path in hashes:
+                            distance = self.compute_hash_distance(cand_hash, hashes[prev_path])
+                            if distance <= max_distance:
                                 cand_is_dup = True
                                 break
 
@@ -383,7 +409,7 @@ def predict_photos(
     copy_files: bool = True,
     export_json: Optional[str] = None,
     deduplicate: bool = False,
-    similarity_threshold: float = 0.92
+    similarity_threshold: float = 0.75
 ) -> List[Tuple[str, float, bool]]:
     """
     Main prediction function.
