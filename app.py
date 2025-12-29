@@ -98,7 +98,7 @@ def display_image_grid(images: List[Path], cols: int = 4, max_images: int = 20):
 st.sidebar.title("📷 FotoSelect")
 page = st.sidebar.radio(
     "Navigation",
-    ["Home", "Photos Import", "Upload Photos", "Train Model", "Auto-Curate", "Faces", "Gallery"]
+    ["Home", "Import from Photos App", "Upload Photos", "Train Model", "Auto-Curate", "Faces", "Gallery"]
 )
 
 # ============================================================================
@@ -141,7 +141,7 @@ if page == "Home":
 # ============================================================================
 # PHOTOS IMPORT PAGE
 # ============================================================================
-elif page == "Photos Import":
+elif page == "Import from Photos App":
     st.title("📸 Photos Library Import")
 
     st.markdown("""
