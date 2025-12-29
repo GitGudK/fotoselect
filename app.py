@@ -518,6 +518,16 @@ elif page == "Import Photos":
                             st.balloons()
                             st.success(f"Successfully imported {exported} photos ({skipped} skipped)")
 
+                            # Rebuild date cache from Photos library after export
+                            if exported > 0:
+                                status_text.info("Building date cache from Photos library...")
+                                try:
+                                    from rebuild_date_cache import rebuild_cache_from_photos_db
+                                    result = rebuild_cache_from_photos_db(RAW_DIR)
+                                    st.info(f"📅 Date cache built: {result['matched']:,} photos with dates")
+                                except Exception as e:
+                                    st.warning(f"Could not build date cache: {e}")
+
                         elif export_favorites:
                             def progress_callback(current, total, filename):
                                 progress = int((current / total) * 100) if total > 0 else 0
