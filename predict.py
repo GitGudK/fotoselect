@@ -175,6 +175,10 @@ class PhotoCurator:
         # Use batch date extraction from cache
         date_map = self.get_photo_dates_batch(folder, image_paths, progress_callback)
 
+        # Debug: count how many dates we got
+        dates_found = sum(1 for dt in date_map.values() if dt is not None)
+        print(f"  Date cache returned {dates_found}/{len(image_paths)} photos with dates")
+
         # Build photo_dates dict with cutoff filter
         photo_dates = {}
         for path in image_paths:
@@ -223,6 +227,16 @@ class PhotoCurator:
         print(f"Total selected: {len(selected_paths)} photos from {len(groups)} time groups")
         if no_date_photos:
             print(f"  ({len(no_date_photos)} photos had no date info)")
+
+        # Print year distribution summary
+        if groups:
+            year_counts = defaultdict(int)
+            for key in groups.keys():
+                year = key[:4] if len(key) >= 4 else key
+                year_counts[year] += len(groups[key])
+            print("\nPhotos by year:")
+            for year in sorted(year_counts.keys(), reverse=True):
+                print(f"  {year}: {year_counts[year]:,} photos")
 
         # Build final results
         final_results = []
@@ -529,7 +543,7 @@ class PhotoCurator:
         if self.deduplicate:
             # Get all image paths for hashing
             all_paths = [p for p, _, _ in final_results]
-            hashes = self.compute_perceptual_hashes(all_paths, progress_callback)
+            hashes = self.compute_perceptual_hashes(all_paths, progress_callback, folder=Path(input_folder))
             final_results = self.deduplicate_selection(final_results, hashes, progress_callback)
 
         return final_results
@@ -626,35 +640,75 @@ class PhotoCurator:
     def compute_perceptual_hashes(
         self,
         image_paths: List[str],
-        progress_callback: Optional[callable] = None
+        progress_callback: Optional[callable] = None,
+        folder: Optional[Path] = None
     ) -> Dict[str, imagehash.ImageHash]:
         """
         Compute perceptual hashes for images using multiple hash types.
 
         Uses a combination of pHash (perceptual hash) and dHash (difference hash)
-        for robust similarity detection.
+        for robust similarity detection. Results are cached to avoid recomputation.
 
         Args:
             image_paths: List of image file paths
             progress_callback: Optional callback(current, total, phase) for progress updates
+            folder: Folder containing images (for cache location)
 
         Returns:
             Dictionary mapping image paths to perceptual hash objects
         """
-        hashes = {}
-        total = len(image_paths)
+        from hash_cache import get_cached_hashes, update_hashes
 
-        for i, path in enumerate(tqdm(image_paths, desc='Computing hashes')):
+        # Determine folder from first image if not provided
+        if folder is None and image_paths:
+            folder = Path(image_paths[0]).parent
+
+        # Check cache for already-computed hashes
+        all_filenames = [os.path.basename(p) for p in image_paths]
+        cached = get_cached_hashes(folder, all_filenames) if folder else {}
+
+        hashes = {}
+        needs_hashing = []
+
+        # Separate cached and uncached
+        for path in image_paths:
+            filename = os.path.basename(path)
+            cached_hash = cached.get(filename)
+            if cached_hash is not None:
+                # Convert stored hex string back to ImageHash
+                hashes[path] = imagehash.hex_to_hash(cached_hash)
+            else:
+                needs_hashing.append(path)
+
+        print(f"Hash cache: {len(hashes)} cached, {len(needs_hashing)} need hashing")
+
+        if not needs_hashing:
+            if progress_callback:
+                progress_callback(1, 1, 'features')
+            return hashes
+
+        # Compute hashes for uncached photos
+        total = len(needs_hashing)
+        new_hashes = {}
+
+        for i, path in enumerate(tqdm(needs_hashing, desc='Computing hashes')):
             try:
                 img = Image.open(path)
                 # Use pHash which is good for detecting similar images
                 phash = imagehash.phash(img, hash_size=16)
                 hashes[path] = phash
+                # Store as hex string for JSON serialization
+                new_hashes[os.path.basename(path)] = str(phash)
             except Exception as e:
                 print(f"  Error hashing {Path(path).name}: {e}")
 
             if progress_callback:
                 progress_callback(i + 1, total, 'features')
+
+        # Save new hashes to cache
+        if new_hashes and folder:
+            update_hashes(folder, new_hashes)
+            print(f"Cached {len(new_hashes)} new hashes")
 
         return hashes
 
@@ -735,29 +789,31 @@ class PhotoCurator:
                 final_selected.append((path, score, True))
             else:
                 removed_count += 1
-                # Try to find a replacement from candidates
-                for j, (cand_path, cand_score, _) in enumerate(candidates):
-                    if cand_path not in hashes:
-                        continue
+                # Only try to find a replacement if NOT using time-based grouping
+                # (time-based grouping has strict per-period counts that shouldn't be exceeded)
+                if self.time_grouping is None:
+                    for j, (cand_path, cand_score, _) in enumerate(candidates):
+                        if cand_path not in hashes:
+                            continue
 
-                    cand_hash = hashes[cand_path]
+                        cand_hash = hashes[cand_path]
 
-                    # Check if candidate is similar to any already-selected photo
-                    cand_is_dup = False
-                    for prev_path, _, _ in final_selected:
-                        if prev_path in hashes:
-                            distance = self.compute_hash_distance(cand_hash, hashes[prev_path])
-                            if distance <= max_distance:
-                                cand_is_dup = True
-                                break
+                        # Check if candidate is similar to any already-selected photo
+                        cand_is_dup = False
+                        for prev_path, _, _ in final_selected:
+                            if prev_path in hashes:
+                                distance = self.compute_hash_distance(cand_hash, hashes[prev_path])
+                                if distance <= max_distance:
+                                    cand_is_dup = True
+                                    break
 
-                    if not cand_is_dup:
-                        # Found a good replacement
-                        print(f"  Replaced with: {Path(cand_path).name} (score: {cand_score:.3f})")
-                        final_selected.append((cand_path, cand_score, True))
-                        # Remove from candidates
-                        candidates = candidates[:j] + candidates[j+1:]
-                        break
+                        if not cand_is_dup:
+                            # Found a good replacement
+                            print(f"  Replaced with: {Path(cand_path).name} (score: {cand_score:.3f})")
+                            final_selected.append((cand_path, cand_score, True))
+                            # Remove from candidates
+                            candidates = candidates[:j] + candidates[j+1:]
+                            break
 
         print(f"Deduplication complete: removed {removed_count} duplicates, final selection: {len(final_selected)}")
 

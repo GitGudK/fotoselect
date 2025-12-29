@@ -348,16 +348,16 @@ elif page == "Import Photos":
                         cleared = []
                         if RAW_DIR.exists():
                             clear_folder(RAW_DIR)
-                            # Also clear date and score caches
-                            for cache_file in [".photo_dates.json", ".photo_scores.json"]:
+                            # Also clear date, score, and hash caches
+                            for cache_file in [".photo_dates.json", ".photo_scores.json", ".photo_hashes.json"]:
                                 cache_path = RAW_DIR / cache_file
                                 if cache_path.exists():
                                     cache_path.unlink()
                             cleared.append(f"raw ({raw_count} files)")
                         if CURATED_DIR.exists():
                             clear_folder(CURATED_DIR)
-                            # Also clear date and score caches
-                            for cache_file in [".photo_dates.json", ".photo_scores.json"]:
+                            # Also clear date, score, and hash caches
+                            for cache_file in [".photo_dates.json", ".photo_scores.json", ".photo_hashes.json"]:
                                 cache_path = CURATED_DIR / cache_file
                                 if cache_path.exists():
                                     cache_path.unlink()
@@ -1211,6 +1211,9 @@ elif page == "Auto-Curate":
                         help="Photos below this score will be excluded even if they're the best in their time period"
                     )
                     st.caption(f"Photos scoring below {threshold:.1%} will be excluded")
+                else:
+                    # Disable threshold filtering when checkbox is unchecked
+                    threshold = 0
 
             st.markdown("---")
             dedup_step = "Step 4" if time_grouping is not None else "Step 3"
@@ -1321,9 +1324,8 @@ elif page == "Auto-Curate":
                 status_text.empty()
                 st.success(f"Curation complete! {num_curated} photos selected, {num_rejected} rejected.")
 
-                # Reset pool after curation
-                st.session_state.photo_pool = None
-                st.session_state.pool_built = False
+                # Keep photo pool for re-running with different settings
+                # (pool is only reset when source folder or pool mode changes)
 
                 # Show results
                 st.markdown("### Results")
@@ -1334,19 +1336,56 @@ elif page == "Auto-Curate":
                 with col2:
                     st.metric("Rejected", num_rejected)
 
-                # Show top predictions
-                st.markdown("### Top Rated Photos")
-                top_photos = [(Path(p), s) for p, s, c in results if c][:8]
+                # Show selected photos
+                selected_photos = [(Path(p), s) for p, s, c in results if c]
 
-                if top_photos:
-                    cols = st.columns(4)
-                    for i, (photo_path, score) in enumerate(top_photos):
-                        with cols[i % 4]:
-                            try:
-                                img = Image.open(photo_path)
-                                st.image(img, caption=f"{photo_path.name}\nScore: {score:.2f}", use_container_width=True)
-                            except:
-                                pass
+                if time_grouping is not None and selected_photos:
+                    # Group by year for display
+                    from date_cache import get_photo_dates
+                    from collections import defaultdict
+
+                    photo_paths = [str(p) for p, _ in selected_photos]
+                    date_map = get_photo_dates(SOURCE_DIR, photo_paths)
+
+                    # Group by year
+                    by_year = defaultdict(list)
+                    for photo_path, score in selected_photos:
+                        dt = date_map.get(str(photo_path))
+                        if dt:
+                            year = str(dt.year)
+                        else:
+                            year = "Unknown"
+                        by_year[year].append((photo_path, score))
+
+                    # Display by year (most recent first)
+                    st.markdown("### Selected Photos by Year")
+                    for year in sorted(by_year.keys(), reverse=True):
+                        year_photos = by_year[year]
+                        st.markdown(f"#### {year} ({len(year_photos)} photos)")
+                        cols = st.columns(4)
+                        for i, (photo_path, score) in enumerate(year_photos[:8]):
+                            with cols[i % 4]:
+                                try:
+                                    img = Image.open(photo_path)
+                                    st.image(img, caption=f"{photo_path.name}\nScore: {score:.2f}", use_container_width=True)
+                                except:
+                                    pass
+                        if len(year_photos) > 8:
+                            st.caption(f"...and {len(year_photos) - 8} more from {year}")
+                else:
+                    # Show top predictions (original behavior)
+                    st.markdown("### Top Rated Photos")
+                    top_photos = selected_photos[:8]
+
+                    if top_photos:
+                        cols = st.columns(4)
+                        for i, (photo_path, score) in enumerate(top_photos):
+                            with cols[i % 4]:
+                                try:
+                                    img = Image.open(photo_path)
+                                    st.image(img, caption=f"{photo_path.name}\nScore: {score:.2f}", use_container_width=True)
+                                except:
+                                    pass
 
 # ============================================================================
 # FACES PAGE
