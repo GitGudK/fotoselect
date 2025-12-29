@@ -319,7 +319,7 @@ elif page == "Import Photos":
                 clear_before = st.checkbox("Clear existing photos before export", value=False)
 
                 # Tracking file management
-                col1, col2 = st.columns(2)
+                col1, col2, col3 = st.columns(3)
                 with col1:
                     if st.button("🔄 Sync Download Tracking", help="Sync tracking with existing files - next export will only download missing photos"):
                         from download_icloud import sync_tracking_with_folder
@@ -335,13 +335,30 @@ elif page == "Import Photos":
                         else:
                             st.info("No photo folders found")
                 with col2:
+                    if st.button("📅 Rebuild Date Cache", help="Rebuild date cache from Photos library - fixes date filtering"):
+                        from rebuild_date_cache import rebuild_cache_from_photos_db
+                        with st.spinner("Rebuilding date cache from Photos library..."):
+                            if RAW_DIR.exists():
+                                result = rebuild_cache_from_photos_db(RAW_DIR)
+                                st.success(f"Rebuilt date cache: {result['matched']:,} photos with dates")
+                            else:
+                                st.warning("No raw photos folder found")
+                with col3:
                     if st.button("🗑️ Clear All & Start Over", type="secondary", help="Delete all exported photos and tracking data"):
                         cleared = []
                         if RAW_DIR.exists():
                             clear_folder(RAW_DIR)
+                            # Also clear date cache
+                            date_cache = RAW_DIR / ".photo_dates.json"
+                            if date_cache.exists():
+                                date_cache.unlink()
                             cleared.append(f"raw ({raw_count} files)")
                         if CURATED_DIR.exists():
                             clear_folder(CURATED_DIR)
+                            # Also clear date cache
+                            date_cache = CURATED_DIR / ".photo_dates.json"
+                            if date_cache.exists():
+                                date_cache.unlink()
                             cleared.append(f"curated ({curated_count} files)")
                         if cleared:
                             st.success(f"Cleared: {', '.join(cleared)}")
