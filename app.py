@@ -698,6 +698,40 @@ elif page == "Train Model":
         )
 
     st.markdown("---")
+    st.markdown("### Data Selection")
+
+    data_selection_mode = st.radio(
+        "Training Data",
+        ["All Photos", "Fixed Number", "Percentage"],
+        horizontal=True,
+        help="Choose how much training data to use"
+    )
+
+    # Initialize filter variables
+    max_samples = None
+    train_percentage = None
+
+    if data_selection_mode == "Fixed Number":
+        max_samples_input = st.number_input(
+            "Max training samples",
+            min_value=10,
+            max_value=raw_count + curated_count,
+            value=min(500, raw_count + curated_count),
+            help="Maximum total number of samples to use for training"
+        )
+        max_samples = int(max_samples_input)
+        st.info(f"Will use up to {max_samples} samples (maintaining class balance)")
+
+    elif data_selection_mode == "Percentage":
+        train_percentage = st.slider(
+            "Percentage of photos to use",
+            10, 100, 100,
+            help="Randomly sample this percentage of photos for training"
+        )
+        estimated = int((raw_count + curated_count) * train_percentage / 100)
+        st.info(f"Will use ~{train_percentage}% of data (~{estimated} samples)")
+
+    st.markdown("---")
 
     if st.button("🚀 Start Training", type="primary", disabled=(raw_count < 5 or curated_count < 3)):
         from train import train_model
@@ -766,7 +800,9 @@ elif page == "Train Model":
                 learning_rate=learning_rate,
                 freeze_backbone=freeze_backbone,
                 early_stopping_patience=patience,
-                progress_callback=update_progress
+                progress_callback=update_progress,
+                max_samples=max_samples,
+                percentage=train_percentage
             )
 
             progress_bar.progress(100)
@@ -788,6 +824,9 @@ elif page == "Train Model":
     # Model Management Section
     st.markdown("---")
     st.markdown("### Model Management")
+
+    # Check if model exists
+    has_model = (CHECKPOINTS_DIR / "best.pt").exists()
 
     # List existing saved models
     saved_models = list(CHECKPOINTS_DIR.glob("*.pt"))
@@ -839,168 +878,435 @@ elif page == "Auto-Curate":
     st.title("🤖 Auto-Curate Photos")
 
     has_model = (CHECKPOINTS_DIR / "best.pt").exists()
-    input_count = len(get_image_files(INPUT_DIR))
 
     if not has_model:
         st.error("No trained model found. Please train a model first.")
-    elif input_count == 0:
-        st.warning("No photos to curate. Please upload photos in the Upload section.")
     else:
-        st.success(f"Model ready. {input_count} photos pending curation.")
+        # Initialize session state for photo pool
+        if 'photo_pool' not in st.session_state:
+            st.session_state.photo_pool = None
+        if 'pool_built' not in st.session_state:
+            st.session_state.pool_built = False
+        if 'last_pool_mode' not in st.session_state:
+            st.session_state.last_pool_mode = None
+        if 'last_source_folder' not in st.session_state:
+            st.session_state.last_source_folder = None
 
-        st.markdown("---")
-        st.markdown("### Selection Mode")
+        # Photo pool parameters
+        pool_max_photos = None
+        pool_percentage = None
+        pool_date_from = None
+        pool_date_to = None
 
-        selection_mode = st.radio(
-            "How do you want to select photos?",
-            ["Fixed Number", "Percentage", "Score Threshold"],
-            horizontal=True
-        )
-
-        # Selection parameters based on mode
+        # Selection parameters
         top_n = None
         top_percent = None
         threshold = 0.5
+        time_grouping = None
+        photos_per_group = 1
+        last_n_days = None
 
-        if selection_mode == "Fixed Number":
-            top_n = st.number_input(
-                "Number of photos to select",
-                min_value=1,
-                max_value=input_count,
-                value=min(10, input_count),
-                help="Select exactly this many top-scoring photos"
-            )
-            st.info(f"Will select the top {top_n} photos out of {input_count}")
+        st.markdown("### Step 1: Photo Pool")
+        st.caption("Select source folder and filter which photos to consider for curation")
 
-        elif selection_mode == "Percentage":
-            top_percent = st.slider(
-                "Percentage of photos to select",
-                1, 100, 25,
-                help="Select the top X% of photos"
-            )
-            num_selected = max(1, int(input_count * top_percent / 100))
-            st.info(f"Will select ~{num_selected} photos ({top_percent}% of {input_count})")
-
-        else:  # Score Threshold
-            threshold = st.slider(
-                "Score Threshold",
-                0.0, 1.0, 0.5,
-                help="Select photos with score above this threshold"
-            )
-            if threshold < 0.4:
-                st.info("📈 Permissive - More photos will be selected")
-            elif threshold > 0.6:
-                st.info("📉 Strict - Fewer photos will be selected")
-            else:
-                st.info("⚖️ Balanced - Moderate selection")
-
-        st.markdown("---")
-        st.markdown("### Deduplication")
-
-        deduplicate = st.checkbox(
-            "Remove similar/duplicate photos",
-            value=True,
-            help="Compare selected photos and replace duplicates with different ones"
+        # Source folder selection
+        source_options = {
+            "Raw Photos (Imported)": RAW_DIR,
+            "Input (Uploaded for Curation)": INPUT_DIR,
+        }
+        source_choice = st.selectbox(
+            "Source folder",
+            list(source_options.keys()),
+            help="Choose which folder to curate photos from"
         )
+        SOURCE_DIR = source_options[source_choice]
+        input_count = len(get_image_files(SOURCE_DIR))
 
-        if deduplicate:
-            similarity_threshold = st.slider(
-                "Similarity threshold",
-                0.0, 1.0, 0.75,
-                help="Higher = only remove very similar photos, Lower = more aggressive deduplication"
-            )
+        # Reset pool if source folder changed
+        if st.session_state.last_source_folder != source_choice:
+            if st.session_state.pool_built:
+                st.session_state.photo_pool = None
+                st.session_state.pool_built = False
+            st.session_state.last_source_folder = source_choice
+
+        if input_count == 0:
+            st.warning(f"No photos in {source_choice}. Please import or upload photos first.")
         else:
-            similarity_threshold = 0.75
-
-        st.markdown("---")
-
-        # Options
-        col1, col2 = st.columns(2)
-        with col1:
-            clear_output = st.checkbox("Clear output folder first", value=True)
-        with col2:
-            clear_input_after = st.checkbox("Clear input folder after curation", value=False)
-
-        if st.button("🎯 Run Auto-Curation", type="primary"):
-            from predict import PhotoCurator
-
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-
-            curator = PhotoCurator(
-                checkpoint_path=str(CHECKPOINTS_DIR / "best.pt"),
-                threshold=threshold,
-                top_n=top_n,
-                top_percent=top_percent,
-                deduplicate=deduplicate,
-                similarity_threshold=similarity_threshold
+            pool_mode = st.radio(
+                "Photo pool",
+                ["All Photos", "Fixed Number", "Percentage", "Date Range"],
+                horizontal=True,
+                help="Filter which photos to consider for curation",
+                key="pool_mode"
             )
 
-            def update_progress(current, total, phase):
-                if phase == 'scoring':
-                    # Scoring is 0-50% (or 0-100% if no dedup)
-                    max_pct = 50 if deduplicate else 100
-                    pct = int((current / total) * max_pct)
-                    status_text.text(f"Scoring photos: {current}/{total} batches")
-                elif phase == 'features':
-                    # Feature extraction is 50-75%
-                    pct = 50 + int((current / total) * 25)
-                    status_text.text(f"Extracting features: {current}/{total} batches")
-                elif phase == 'dedup':
-                    # Deduplication is 75-100%
-                    pct = 75 + int((current / total) * 25)
-                    status_text.text(f"Deduplicating: {current}/{total} photos")
-                else:
-                    pct = 0
-                progress_bar.progress(min(pct, 100))
+            # Reset pool if mode changed
+            if st.session_state.last_pool_mode != pool_mode:
+                if st.session_state.pool_built:
+                    st.session_state.photo_pool = None
+                    st.session_state.pool_built = False
+                st.session_state.last_pool_mode = pool_mode
 
-            status_text.text("Loading model...")
-            results = curator.predict_folder(str(INPUT_DIR), progress_callback=update_progress)
+            # Calculate estimated pool size based on selection
+            if pool_mode == "All Photos":
+                estimated_pool = input_count
+            elif pool_mode == "Fixed Number":
+                pool_max_photos = st.number_input(
+                    "Maximum photos to consider",
+                    min_value=1,
+                    max_value=input_count,
+                    value=min(100, input_count),
+                    help="Randomly sample this many photos from the source folder"
+                )
+                estimated_pool = int(pool_max_photos)
+            elif pool_mode == "Percentage":
+                pool_percentage = st.slider(
+                    "Percentage of photos to consider",
+                    1, 100, 50,
+                    help="Randomly sample this percentage of photos"
+                )
+                estimated_pool = max(1, int(input_count * pool_percentage / 100))
+            else:  # Date Range
+                from datetime import datetime, timedelta
+                col1, col2 = st.columns(2)
+                with col1:
+                    date_from_input = st.date_input(
+                        "From date",
+                        value=datetime.now() - timedelta(days=365),
+                        help="Only consider photos taken on or after this date"
+                    )
+                    pool_date_from = datetime.combine(date_from_input, datetime.min.time())
+                with col2:
+                    date_to_input = st.date_input(
+                        "To date",
+                        value=datetime.now(),
+                        help="Only consider photos taken on or before this date"
+                    )
+                    pool_date_to = datetime.combine(date_to_input, datetime.max.time())
+                # For date range, we can't know the exact count without scanning
+                estimated_pool = None
 
-            progress_bar.progress(100)
-            status_text.text("Organizing files...")
-
-            # Clear output folder if requested
-            if clear_output:
-                clear_folder(OUTPUT_DIR)
-
-            # Pass pre-computed results to avoid duplicate processing
-            num_curated, num_rejected = curator.curate_folder(
-                input_folder=str(INPUT_DIR),
-                output_folder=str(OUTPUT_DIR),
-                copy_files=True,
-                results=results
-            )
-
-            # Clear input folder if requested
-            if clear_input_after:
-                clear_folder(INPUT_DIR)
-
-            status_text.empty()
-            st.success(f"Curation complete! {num_curated} photos selected, {num_rejected} rejected.")
-
-            # Show results
-            st.markdown("### Results")
-
+            # Show pool summary
             col1, col2 = st.columns(2)
             with col1:
-                st.metric("Selected", num_curated, delta=f"{num_curated/(num_curated+num_rejected)*100:.0f}%")
+                st.metric("Available Photos", f"{input_count:,}")
             with col2:
-                st.metric("Rejected", num_rejected)
+                if st.session_state.pool_built and st.session_state.photo_pool is not None:
+                    pool_count = len(st.session_state.photo_pool)
+                    st.metric("Photo Pool", f"{pool_count:,}", delta=f"{pool_count/input_count*100:.0f}%")
+                elif estimated_pool is not None:
+                    st.metric("Estimated Pool", f"~{estimated_pool:,}", help="Click 'Build Photo Pool' to get exact count")
+                else:
+                    st.metric("Photo Pool", "TBD", help="Click 'Build Photo Pool' to filter by date")
 
-            # Show top predictions
-            st.markdown("### Top Rated Photos")
-            top_photos = [(Path(p), s) for p, s, c in results if c][:8]
+            # Build Photo Pool button
+            if st.button("📋 Build Photo Pool", type="secondary"):
+                from predict import PhotoCurator
+                from dataset import find_images
 
-            if top_photos:
-                cols = st.columns(4)
-                for i, (photo_path, score) in enumerate(top_photos):
-                    with cols[i % 4]:
-                        try:
-                            img = Image.open(photo_path)
-                            st.image(img, caption=f"{photo_path.name}\nScore: {score:.2f}", use_container_width=True)
-                        except:
-                            pass
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+
+                status_text.text("Loading photos...")
+
+                # Get all images in source folder
+                all_images = find_images(SOURCE_DIR)
+                all_image_paths = [str(p) for p in all_images]
+
+                status_text.text(f"Found {len(all_image_paths):,} photos. Applying filters...")
+
+                # Apply filtering if needed
+                if pool_mode == "All Photos":
+                    filtered_paths = all_image_paths
+                    progress_bar.progress(100)
+                else:
+                    # Create a temporary curator just for filtering
+                    curator = PhotoCurator(
+                        checkpoint_path=str(CHECKPOINTS_DIR / "best.pt"),
+                        threshold=0.5
+                    )
+
+                    def filter_progress(current, total, phase):
+                        pct = int((current / total) * 100) if total > 0 else 0
+                        progress_bar.progress(pct)
+                        status_text.text(f"Filtering photos: {current:,}/{total:,}")
+
+                    filtered_paths = curator.filter_photos_by_pool(
+                        all_image_paths,
+                        max_photos=int(pool_max_photos) if pool_max_photos else None,
+                        percentage=pool_percentage,
+                        date_from=pool_date_from,
+                        date_to=pool_date_to,
+                        progress_callback=filter_progress
+                    )
+                    progress_bar.progress(100)
+
+                # Store in session state
+                st.session_state.photo_pool = filtered_paths
+                st.session_state.pool_built = True
+
+                status_text.empty()
+                progress_bar.empty()
+                st.rerun()
+
+            # Show pool results if built
+            if st.session_state.pool_built and st.session_state.photo_pool is not None:
+                pool_count = len(st.session_state.photo_pool)
+                st.success(f"Photo pool ready: {pool_count:,} photos selected for curation")
+
+                # Show sample of pool photos
+                with st.expander("Preview pool photos"):
+                    sample_paths = st.session_state.photo_pool[:8]
+                    if sample_paths:
+                        cols = st.columns(4)
+                        for i, photo_path in enumerate(sample_paths):
+                            with cols[i % 4]:
+                                try:
+                                    img = Image.open(photo_path)
+                                    st.image(img, caption=Path(photo_path).name, use_container_width=True)
+                                except:
+                                    pass
+                        if pool_count > 8:
+                            st.caption(f"...and {pool_count - 8:,} more photos")
+
+                # Button to reset pool
+                if st.button("🔄 Reset Photo Pool"):
+                    st.session_state.photo_pool = None
+                    st.session_state.pool_built = False
+                    st.rerun()
+
+            st.markdown("---")
+            st.markdown("### Step 2: Selection")
+            st.caption("How many photos to select from the pool?")
+
+            # Get current pool size for UI elements
+            current_pool_size = len(st.session_state.photo_pool) if st.session_state.pool_built and st.session_state.photo_pool else input_count
+
+            # Stage 2: How many photos to select
+            selection_mode = st.radio(
+                "Selection method",
+                ["Fixed Number", "Percentage", "Best Per Time Period"],
+                horizontal=True,
+                help="Choose how to determine the number of photos to select"
+            )
+
+            if selection_mode == "Fixed Number":
+                top_n = st.number_input(
+                    "Number of photos to select",
+                    min_value=1,
+                    max_value=current_pool_size,
+                    value=min(10, current_pool_size),
+                    help="Select exactly this many top-scoring photos"
+                )
+                if st.session_state.pool_built:
+                    st.info(f"Will select the top {top_n} photos from pool of {current_pool_size:,}")
+                else:
+                    st.caption("Build photo pool to see exact selection count")
+
+            elif selection_mode == "Percentage":
+                top_percent = st.slider(
+                    "Percentage of photos to select",
+                    1, 100, 25,
+                    help="Select the top X% of photos"
+                )
+                num_selected = max(1, int(current_pool_size * top_percent / 100))
+                if st.session_state.pool_built:
+                    st.info(f"Will select ~{num_selected:,} photos ({top_percent}% of {current_pool_size:,})")
+                else:
+                    st.caption("Build photo pool to see exact selection count")
+
+            else:  # Best Per Time Period
+                col1, col2 = st.columns(2)
+                with col1:
+                    time_grouping = st.selectbox(
+                        "Group photos by",
+                        ["Year", "Month", "Last N Days"],
+                        help="Select how to group photos for selection"
+                    )
+                with col2:
+                    if time_grouping == "Last N Days":
+                        last_n_days = st.number_input(
+                            "Number of days",
+                            min_value=1,
+                            max_value=365,
+                            value=30,
+                            help="Select best photos from the last N days"
+                        )
+                        photos_per_group = st.number_input(
+                            "Photos to select",
+                            min_value=1,
+                            max_value=100,
+                            value=10,
+                            help="Number of best photos to select from this period"
+                        )
+                    else:
+                        photos_per_group = st.number_input(
+                            f"Best photos per {time_grouping.lower()}",
+                            min_value=1,
+                            max_value=50,
+                            value=5,
+                            help=f"Select this many top photos from each {time_grouping.lower()}"
+                        )
+
+                if time_grouping == "Year":
+                    st.info(f"Will select the top {photos_per_group} photo(s) from each year")
+                elif time_grouping == "Month":
+                    st.info(f"Will select the top {photos_per_group} photo(s) from each month")
+                else:
+                    st.info(f"Will select the top {photos_per_group} photo(s) from the last {last_n_days} days")
+
+            # Step 3: Score threshold (only shown for time-based selection)
+            if time_grouping is not None:
+                st.markdown("---")
+                st.markdown("### Step 3: Score Threshold")
+                use_threshold = st.checkbox(
+                    "Apply minimum score threshold",
+                    value=False,
+                    help="Only include photos that meet a minimum quality score"
+                )
+                if use_threshold:
+                    threshold = st.slider(
+                        "Minimum score",
+                        0.0, 1.0, 0.3,
+                        help="Photos below this score will be excluded even if they're the best in their time period"
+                    )
+                    st.caption(f"Photos scoring below {threshold:.1%} will be excluded")
+
+            st.markdown("---")
+            dedup_step = "Step 4" if time_grouping is not None else "Step 3"
+            st.markdown(f"### {dedup_step}: Deduplication")
+
+            deduplicate = st.checkbox(
+                "Remove similar/duplicate photos",
+                value=True,
+                help="Compare selected photos and replace duplicates with different ones"
+            )
+
+            if deduplicate:
+                similarity_threshold = st.slider(
+                    "Similarity threshold",
+                    0.0, 1.0, 0.75,
+                    help="Higher = only remove very similar photos, Lower = more aggressive deduplication"
+                )
+            else:
+                similarity_threshold = 0.75
+
+            st.markdown("---")
+
+            # Options
+            col1, col2 = st.columns(2)
+            with col1:
+                clear_output = st.checkbox("Clear output folder first", value=True)
+            with col2:
+                clear_source_after = st.checkbox("Clear source folder after curation", value=False)
+
+            # Disable button if photo pool hasn't been built
+            pool_ready = st.session_state.pool_built and st.session_state.photo_pool is not None
+            if not pool_ready:
+                st.warning("Please build the photo pool first (Step 1) before running curation.")
+
+            if st.button("🎯 Run Auto-Curation", type="primary", disabled=not pool_ready):
+                from predict import PhotoCurator
+
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+
+                curator = PhotoCurator(
+                    checkpoint_path=str(CHECKPOINTS_DIR / "best.pt"),
+                    threshold=threshold,
+                    top_n=top_n,
+                    top_percent=top_percent,
+                    deduplicate=deduplicate,
+                    similarity_threshold=similarity_threshold,
+                    time_grouping=time_grouping,
+                    photos_per_group=int(photos_per_group) if photos_per_group else 1,
+                    last_n_days=int(last_n_days) if last_n_days else None
+                )
+
+                # Determine progress phases based on options
+                has_time_grouping = time_grouping is not None
+
+                def update_progress(current, total, phase):
+                    if phase == 'scoring':
+                        # Scoring phase: 0-50% if time grouping or dedup, else 0-100%
+                        if has_time_grouping or deduplicate:
+                            max_pct = 50
+                        else:
+                            max_pct = 100
+                        pct = int((current / total) * max_pct)
+                        status_text.text(f"Scoring photos: {current}/{total} batches")
+                    elif phase == 'dates':
+                        # Date extraction: 50-60%
+                        pct = 50 + int((current / total) * 10)
+                        status_text.text(f"Reading photo dates: {current}/{total}")
+                    elif phase == 'features':
+                        # Feature extraction: 60-80%
+                        pct = 60 + int((current / total) * 20)
+                        status_text.text(f"Computing hashes: {current}/{total}")
+                    elif phase == 'dedup':
+                        # Deduplication: 80-100%
+                        pct = 80 + int((current / total) * 20)
+                        status_text.text(f"Deduplicating: {current}/{total} photos")
+                    else:
+                        pct = 0
+                    progress_bar.progress(min(pct, 100))
+
+                status_text.text("Loading model...")
+                # Use the pre-built photo pool from session state
+                results = curator.predict_folder(
+                    str(SOURCE_DIR),
+                    progress_callback=update_progress,
+                    image_paths=st.session_state.photo_pool
+                )
+
+                progress_bar.progress(100)
+                status_text.text("Organizing files...")
+
+                # Clear output folder if requested
+                if clear_output:
+                    clear_folder(OUTPUT_DIR)
+
+                # Pass pre-computed results to avoid duplicate processing
+                num_curated, num_rejected = curator.curate_folder(
+                    input_folder=str(SOURCE_DIR),
+                    output_folder=str(OUTPUT_DIR),
+                    copy_files=True,
+                    results=results
+                )
+
+                # Clear source folder if requested
+                if clear_source_after:
+                    clear_folder(SOURCE_DIR)
+
+                status_text.empty()
+                st.success(f"Curation complete! {num_curated} photos selected, {num_rejected} rejected.")
+
+                # Reset pool after curation
+                st.session_state.photo_pool = None
+                st.session_state.pool_built = False
+
+                # Show results
+                st.markdown("### Results")
+
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("Selected", num_curated, delta=f"{num_curated/(num_curated+num_rejected)*100:.0f}%")
+                with col2:
+                    st.metric("Rejected", num_rejected)
+
+                # Show top predictions
+                st.markdown("### Top Rated Photos")
+                top_photos = [(Path(p), s) for p, s, c in results if c][:8]
+
+                if top_photos:
+                    cols = st.columns(4)
+                    for i, (photo_path, score) in enumerate(top_photos):
+                        with cols[i % 4]:
+                            try:
+                                img = Image.open(photo_path)
+                                st.image(img, caption=f"{photo_path.name}\nScore: {score:.2f}", use_container_width=True)
+                            except:
+                                pass
 
 # ============================================================================
 # FACES PAGE

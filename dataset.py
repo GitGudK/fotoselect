@@ -146,7 +146,8 @@ class InferenceDataset(Dataset):
     def __init__(
         self,
         folder: str,
-        image_size: int = 224
+        image_size: int = 224,
+        image_paths: Optional[List[Path]] = None
     ):
         self.folder = Path(folder)
         self.image_size = image_size
@@ -160,8 +161,14 @@ class InferenceDataset(Dataset):
             )
         ])
 
-        self.images = find_images(self.folder)
-        print(f"Found {len(self.images)} images for inference")
+        if image_paths is not None:
+            # Use provided list of image paths
+            self.images = [Path(p) for p in image_paths]
+            print(f"Using {len(self.images)} pre-filtered images for inference")
+        else:
+            # Find all images in folder
+            self.images = find_images(self.folder)
+            print(f"Found {len(self.images)} images for inference")
 
     def __len__(self) -> int:
         return len(self.images)
@@ -184,10 +191,24 @@ def create_data_loaders(
     batch_size: int = 32,
     val_split: float = 0.2,
     image_size: int = 224,
-    num_workers: int = 4
+    num_workers: int = 4,
+    max_samples: Optional[int] = None,
+    percentage: Optional[float] = None
 ) -> Tuple[DataLoader, DataLoader]:
-    """Create training and validation data loaders."""
+    """Create training and validation data loaders.
+
+    Args:
+        raw_folder: Path to folder containing all raw photos
+        curated_folder: Path to folder containing curated/selected photos
+        batch_size: Batch size for training
+        val_split: Fraction of data to use for validation
+        image_size: Image size for training
+        num_workers: Number of data loading workers
+        max_samples: If set, limit total samples to this number
+        percentage: If set (0-100), use only this percentage of samples
+    """
     from sklearn.model_selection import train_test_split
+    import random
 
     # Create full dataset
     full_dataset = PhotoCurationDataset(
@@ -196,9 +217,46 @@ def create_data_loaders(
         image_size=image_size
     )
 
-    # Split into train/val
-    indices = list(range(len(full_dataset)))
-    labels = [full_dataset.samples[i][1] for i in indices]
+    # Apply filtering if specified
+    total_samples = len(full_dataset)
+
+    if percentage is not None and 0 < percentage < 100:
+        num_to_keep = max(1, int(total_samples * percentage / 100))
+        print(f"Using {percentage}% of data: {num_to_keep} samples")
+    elif max_samples is not None and max_samples < total_samples:
+        num_to_keep = max_samples
+        print(f"Limiting to {num_to_keep} samples")
+    else:
+        num_to_keep = total_samples
+
+    if num_to_keep < total_samples:
+        # Sample indices while trying to maintain class balance
+        all_indices = list(range(total_samples))
+        labels = [full_dataset.samples[i][1] for i in all_indices]
+
+        # Separate by class
+        pos_indices = [i for i, l in enumerate(labels) if l == 1]
+        neg_indices = [i for i, l in enumerate(labels) if l == 0]
+
+        # Calculate how many to keep from each class (proportional)
+        pos_ratio = len(pos_indices) / total_samples
+        num_pos = max(1, int(num_to_keep * pos_ratio))
+        num_neg = num_to_keep - num_pos
+
+        # Sample from each class
+        random.seed(42)  # For reproducibility
+        sampled_pos = random.sample(pos_indices, min(num_pos, len(pos_indices)))
+        sampled_neg = random.sample(neg_indices, min(num_neg, len(neg_indices)))
+
+        selected_indices = sampled_pos + sampled_neg
+        random.shuffle(selected_indices)
+
+        # Update labels for stratified split
+        labels = [labels[i] for i in selected_indices]
+        indices = selected_indices
+    else:
+        indices = list(range(total_samples))
+        labels = [full_dataset.samples[i][1] for i in indices]
 
     train_indices, val_indices = train_test_split(
         indices,

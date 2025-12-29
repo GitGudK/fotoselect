@@ -6,6 +6,8 @@ import os
 import shutil
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict
+from datetime import datetime, timedelta
+from collections import defaultdict
 import json
 
 import torch
@@ -32,7 +34,10 @@ class PhotoCurator:
         top_n: Optional[int] = None,
         top_percent: Optional[float] = None,
         deduplicate: bool = False,
-        similarity_threshold: float = 0.75
+        similarity_threshold: float = 0.75,
+        time_grouping: Optional[str] = None,
+        photos_per_group: int = 1,
+        last_n_days: Optional[int] = None
     ):
         """
         Initialize the curator.
@@ -47,12 +52,18 @@ class PhotoCurator:
             deduplicate: If True, remove similar photos from selection
             similarity_threshold: Perceptual hash similarity threshold (0-1, default 0.75)
                 Lower values = more aggressive deduplication
+            time_grouping: If set, group photos by time period ('Year', 'Month', or 'Last N Days')
+            photos_per_group: Number of best photos to select from each time group
+            last_n_days: For 'Last N Days' mode, the number of days to look back
         """
         self.threshold = threshold
         self.top_n = top_n
         self.top_percent = top_percent
         self.deduplicate = deduplicate
         self.similarity_threshold = similarity_threshold
+        self.time_grouping = time_grouping
+        self.photos_per_group = photos_per_group
+        self.last_n_days = last_n_days
 
         # Device setup
         if device is None:
@@ -71,13 +82,208 @@ class PhotoCurator:
         self.model = load_model(checkpoint_path, backbone, self.device)
         print(f"Loaded model from {checkpoint_path}")
 
+    def get_photo_date(self, image_path: str, use_mtime_fallback: bool = True) -> Optional[datetime]:
+        """
+        Extract date from photo EXIF data.
+
+        Args:
+            image_path: Path to the image file
+            use_mtime_fallback: If True, fall back to file modification time when no EXIF date.
+                               Set to False when filtering by date range to avoid incorrect dates.
+
+        Returns datetime or None if date cannot be determined.
+        """
+        try:
+            img = Image.open(image_path)
+            exif = img._getexif()
+            if exif:
+                # Try DateTimeOriginal (36867) first, then DateTime (306)
+                for tag_id in [36867, 306]:
+                    if tag_id in exif:
+                        date_str = exif[tag_id]
+                        try:
+                            return datetime.strptime(date_str, '%Y:%m:%d %H:%M:%S')
+                        except ValueError:
+                            pass
+        except Exception:
+            pass
+
+        # Fall back to file modification time only if requested
+        if use_mtime_fallback:
+            try:
+                mtime = os.path.getmtime(image_path)
+                return datetime.fromtimestamp(mtime)
+            except Exception:
+                pass
+
+        return None
+
+    def get_time_group_key(self, dt: datetime) -> str:
+        """Get the grouping key for a datetime based on time_grouping setting."""
+        if self.time_grouping == "Year":
+            return str(dt.year)
+        elif self.time_grouping == "Month":
+            return f"{dt.year}-{dt.month:02d}"
+        else:  # Last N Days - all photos in range go to same group
+            return "recent"
+
+    def select_by_time_groups(
+        self,
+        results: List[Tuple[str, float]],
+        progress_callback: Optional[callable] = None
+    ) -> List[Tuple[str, float, bool]]:
+        """
+        Select best photos from each time group.
+
+        Args:
+            results: List of (path, score) tuples, sorted by score descending
+            progress_callback: Optional callback for progress updates
+
+        Returns:
+            List of (path, score, should_curate) tuples
+        """
+        # Get dates for all photos
+        photo_dates = {}
+        cutoff_date = None
+
+        if self.time_grouping == "Last N Days" and self.last_n_days:
+            cutoff_date = datetime.now() - timedelta(days=self.last_n_days)
+
+        print(f"\nGrouping photos by {self.time_grouping}...")
+
+        for i, (path, score) in enumerate(results):
+            dt = self.get_photo_date(path)
+            if dt:
+                # For "Last N Days", filter out photos outside the range
+                if cutoff_date and dt < cutoff_date:
+                    photo_dates[path] = None  # Mark as outside range
+                else:
+                    photo_dates[path] = dt
+            else:
+                photo_dates[path] = None
+
+            if progress_callback and (i + 1) % 50 == 0:
+                progress_callback(i + 1, len(results), 'dates')
+
+        # Group photos by time period
+        groups = defaultdict(list)
+        no_date_photos = []
+
+        for path, score in results:
+            dt = photo_dates.get(path)
+            if dt is None:
+                no_date_photos.append((path, score))
+            else:
+                key = self.get_time_group_key(dt)
+                groups[key].append((path, score, dt))
+
+        # Select best from each group (already sorted by score)
+        selected_paths = set()
+
+        for key in sorted(groups.keys(), reverse=True):  # Most recent first
+            group_photos = groups[key]
+            # Sort by score within group
+            group_photos.sort(key=lambda x: x[1], reverse=True)
+
+            # Take top N from this group (applying threshold if set)
+            selected_from_group = 0
+            for path, score, dt in group_photos[:self.photos_per_group]:
+                # Apply threshold filter if threshold is not default (0.5)
+                if self.threshold > 0 and score < self.threshold:
+                    continue
+                selected_paths.add(path)
+                selected_from_group += 1
+
+            if len(group_photos) > 0:
+                print(f"  {key}: {len(group_photos)} photos, selected {selected_from_group}")
+
+        print(f"Total selected: {len(selected_paths)} photos from {len(groups)} time groups")
+        if no_date_photos:
+            print(f"  ({len(no_date_photos)} photos had no date info)")
+
+        # Build final results
+        final_results = []
+        for path, score in results:
+            should_curate = path in selected_paths
+            final_results.append((path, score, should_curate))
+
+        return final_results
+
+    def filter_photos_by_pool(
+        self,
+        image_paths: List[str],
+        max_photos: Optional[int] = None,
+        percentage: Optional[float] = None,
+        date_from: Optional[datetime] = None,
+        date_to: Optional[datetime] = None,
+        progress_callback: Optional[callable] = None
+    ) -> List[str]:
+        """
+        Filter photos to create a pool for curation.
+
+        Args:
+            image_paths: List of image file paths
+            max_photos: Maximum number of photos to include
+            percentage: Percentage of photos to include (0-100)
+            date_from: Only include photos taken on or after this date
+            date_to: Only include photos taken on or before this date
+            progress_callback: Optional callback for progress updates
+
+        Returns:
+            Filtered list of image paths
+        """
+        import random
+
+        filtered = list(image_paths)
+
+        # Apply date filter first (most restrictive typically)
+        # Use use_mtime_fallback=False to only match photos with actual EXIF dates
+        if date_from or date_to:
+            date_filtered = []
+            total = len(filtered)
+            for i, path in enumerate(filtered):
+                dt = self.get_photo_date(path, use_mtime_fallback=False)
+                if dt:
+                    if date_from and dt < date_from:
+                        continue
+                    if date_to and dt > date_to:
+                        continue
+                    date_filtered.append(path)
+                # Photos without readable dates are excluded when date filtering is active
+
+                if progress_callback and (i + 1) % 50 == 0:
+                    progress_callback(i + 1, total, 'filtering')
+
+            print(f"Date filter: {len(filtered)} -> {len(date_filtered)} photos")
+            filtered = date_filtered
+
+        # Apply percentage filter (random sampling)
+        if percentage is not None and 0 < percentage < 100:
+            num_to_keep = max(1, int(len(filtered) * percentage / 100))
+            random.seed(42)  # For reproducibility
+            filtered = random.sample(filtered, min(num_to_keep, len(filtered)))
+            print(f"Percentage filter ({percentage}%): keeping {len(filtered)} photos")
+
+        # Apply max_photos limit
+        if max_photos is not None and max_photos < len(filtered):
+            random.seed(42)
+            filtered = random.sample(filtered, max_photos)
+            print(f"Max photos filter: limiting to {len(filtered)} photos")
+
+        return filtered
+
     @torch.no_grad()
     def predict_folder(
         self,
         input_folder: str,
         batch_size: int = 16,
         image_size: int = 224,
-        progress_callback: Optional[callable] = None
+        progress_callback: Optional[callable] = None,
+        max_photos: Optional[int] = None,
+        percentage: Optional[float] = None,
+        date_from: Optional[datetime] = None,
+        date_to: Optional[datetime] = None,
+        image_paths: Optional[List[str]] = None
     ) -> List[Tuple[str, float, bool]]:
         """
         Predict curation scores for all images in a folder.
@@ -87,15 +293,53 @@ class PhotoCurator:
             batch_size: Batch size for inference
             image_size: Image size for processing
             progress_callback: Optional callback(current, total, phase) for progress updates
-                phase is 'scoring', 'features', or 'dedup'
+                phase is 'scoring', 'filtering', 'features', 'dates', or 'dedup'
+            max_photos: Maximum number of photos to consider (photo pool filter)
+            percentage: Percentage of photos to consider (photo pool filter, 0-100)
+            date_from: Only consider photos taken on or after this date
+            date_to: Only consider photos taken on or before this date
+            image_paths: Pre-filtered list of image paths to use (bypasses pool filtering)
 
         Returns:
             List of (image_path, score, should_curate) tuples
         """
-        dataset = InferenceDataset(input_folder, image_size=image_size)
+        from dataset import find_images
+
+        # If pre-filtered paths provided, use them directly
+        if image_paths is not None:
+            print(f"Using pre-filtered photo pool: {len(image_paths)} photos")
+            dataset = InferenceDataset(input_folder, image_size=image_size, image_paths=image_paths)
+        else:
+            # Check if we need to filter the photo pool
+            has_pool_filter = any([
+                max_photos is not None,
+                percentage is not None,
+                date_from is not None,
+                date_to is not None
+            ])
+
+            if has_pool_filter:
+                # Get all images first, then filter
+                all_images = find_images(Path(input_folder))
+                all_image_paths = [str(p) for p in all_images]
+
+                print(f"\nFiltering photo pool from {len(all_image_paths)} photos...")
+                filtered_paths = self.filter_photos_by_pool(
+                    all_image_paths,
+                    max_photos=max_photos,
+                    percentage=percentage,
+                    date_from=date_from,
+                    date_to=date_to,
+                    progress_callback=progress_callback
+                )
+                print(f"Photo pool: {len(filtered_paths)} photos")
+
+                dataset = InferenceDataset(input_folder, image_size=image_size, image_paths=filtered_paths)
+            else:
+                dataset = InferenceDataset(input_folder, image_size=image_size)
 
         if len(dataset) == 0:
-            print("No images found in folder")
+            print("No images found in folder (or all filtered out)")
             return []
 
         loader = DataLoader(
@@ -125,25 +369,30 @@ class PhotoCurator:
         results.sort(key=lambda x: x[1], reverse=True)
 
         # Determine which photos to curate based on selection mode
-        total = len(results)
-        if self.top_n is not None:
-            # Select exactly top_n photos
-            num_to_select = min(self.top_n, total)
-        elif self.top_percent is not None:
-            # Select top X% of photos
-            num_to_select = max(1, int(total * self.top_percent / 100))
+        if self.time_grouping is not None:
+            # Time-based selection: pick best from each time group
+            final_results = self.select_by_time_groups(results, progress_callback)
         else:
-            # Use threshold mode
-            num_to_select = None
-
-        # Add should_curate flag
-        final_results = []
-        for i, (path, score) in enumerate(results):
-            if num_to_select is not None:
-                should_curate = i < num_to_select
+            # Standard selection modes
+            total = len(results)
+            if self.top_n is not None:
+                # Select exactly top_n photos
+                num_to_select = min(self.top_n, total)
+            elif self.top_percent is not None:
+                # Select top X% of photos
+                num_to_select = max(1, int(total * self.top_percent / 100))
             else:
-                should_curate = score >= self.threshold
-            final_results.append((path, score, bool(should_curate)))
+                # Use threshold mode
+                num_to_select = None
+
+            # Add should_curate flag
+            final_results = []
+            for i, (path, score) in enumerate(results):
+                if num_to_select is not None:
+                    should_curate = i < num_to_select
+                else:
+                    should_curate = score >= self.threshold
+                final_results.append((path, score, bool(should_curate)))
 
         # Apply deduplication if enabled
         if self.deduplicate:

@@ -117,6 +117,7 @@ class PhotosLibraryImporter:
     ) -> bytes:
         """
         Downsample an image to a maximum dimension while preserving aspect ratio.
+        Preserves EXIF data (including date taken) in the output.
 
         Args:
             image_path: Path to the image file
@@ -127,6 +128,13 @@ class PhotosLibraryImporter:
             Downsampled image as JPEG bytes
         """
         img = Image.open(image_path)
+
+        # Try to get EXIF data before any conversions
+        exif_data = None
+        try:
+            exif_data = img.info.get('exif')
+        except Exception:
+            pass
 
         # Convert to RGB if necessary
         if img.mode not in ('RGB', 'L'):
@@ -151,9 +159,12 @@ class PhotosLibraryImporter:
         if (new_width, new_height) != (width, height):
             img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
 
-        # Save to bytes
+        # Save to bytes, preserving EXIF if available
         output = io.BytesIO()
-        img.save(output, format='JPEG', quality=quality, optimize=True)
+        if exif_data:
+            img.save(output, format='JPEG', quality=quality, optimize=True, exif=exif_data)
+        else:
+            img.save(output, format='JPEG', quality=quality, optimize=True)
         return output.getvalue()
 
     def _get_photo_filename(self, photo) -> str:

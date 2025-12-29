@@ -314,7 +314,9 @@ def train_model(
     image_size: int = 224,
     freeze_backbone: bool = False,
     early_stopping_patience: int = 10,
-    progress_callback=None
+    progress_callback=None,
+    max_samples: int = None,
+    percentage: float = None
 ) -> Dict:
     """
     Main training function.
@@ -331,6 +333,8 @@ def train_model(
         freeze_backbone: Whether to freeze backbone weights
         early_stopping_patience: Epochs to wait before early stopping
         progress_callback: Optional callback function for progress updates
+        max_samples: If set, limit total training samples to this number
+        percentage: If set (0-100), use only this percentage of samples
 
     Returns:
         Training history dictionary
@@ -340,7 +344,9 @@ def train_model(
         raw_folder=raw_folder,
         curated_folder=curated_folder,
         batch_size=batch_size,
-        image_size=image_size
+        image_size=image_size,
+        max_samples=max_samples,
+        percentage=percentage
     )
 
     # Create model

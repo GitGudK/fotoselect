@@ -54,9 +54,16 @@ def save_tracking(output_dir: Path, downsampled: set):
 
 
 def downsample_image(image_path: Path, output_path: Path, max_size: int = 512, quality: int = 85) -> bool:
-    """Downsample an image to a maximum dimension while preserving aspect ratio."""
+    """Downsample an image to a maximum dimension while preserving aspect ratio and EXIF data."""
     try:
         img = Image.open(image_path)
+
+        # Try to get EXIF data before any conversions
+        exif_data = None
+        try:
+            exif_data = img.info.get('exif')
+        except Exception:
+            pass
 
         if img.mode not in ('RGB', 'L'):
             img = img.convert('RGB')
@@ -78,7 +85,11 @@ def downsample_image(image_path: Path, output_path: Path, max_size: int = 512, q
         if (new_width, new_height) != (width, height):
             img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
 
-        img.save(output_path, format='JPEG', quality=quality, optimize=True)
+        # Save with EXIF data preserved if available
+        if exif_data:
+            img.save(output_path, format='JPEG', quality=quality, optimize=True, exif=exif_data)
+        else:
+            img.save(output_path, format='JPEG', quality=quality, optimize=True)
         return True
     except Exception as e:
         print(f"Error processing {image_path}: {e}")
