@@ -237,21 +237,73 @@ elif page == "Import from Photos App":
                     )
 
                 with col2:
-                    max_raw = st.number_input(
-                        "Max raw photos to export",
-                        min_value=0,
-                        value=0,
-                        help="0 = export all"
+                    download_icloud = st.checkbox(
+                        "Download from iCloud",
+                        value=False,
+                        help="Attempt to download photos stored in iCloud (slower)"
                     )
-                    max_raw = None if max_raw == 0 else int(max_raw)
 
-                    max_curated = st.number_input(
-                        "Max favorited photos to export",
-                        min_value=0,
-                        value=0,
-                        help="0 = export all favorites"
+                st.markdown("---")
+                st.markdown("### Photo Selection")
+
+                selection_mode = st.radio(
+                    "Selection Mode",
+                    ["All Photos", "Fixed Number", "Percentage", "Date Range"],
+                    horizontal=True,
+                    help="Choose how to filter photos for export"
+                )
+
+                # Initialize filter variables
+                max_raw = None
+                max_curated = None
+                percentage = None
+                date_from = None
+                date_to = None
+
+                if selection_mode == "Fixed Number":
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        max_raw_input = st.number_input(
+                            "Max raw photos to export",
+                            min_value=1,
+                            value=100,
+                            help="Maximum number of photos to export"
+                        )
+                        max_raw = int(max_raw_input)
+                    with col2:
+                        max_curated_input = st.number_input(
+                            "Max favorited photos to export",
+                            min_value=1,
+                            value=50,
+                            help="Maximum number of favorites to export"
+                        )
+                        max_curated = int(max_curated_input)
+
+                elif selection_mode == "Percentage":
+                    percentage = st.slider(
+                        "Percentage of photos to export",
+                        1, 100, 25,
+                        help="Randomly sample this percentage of photos"
                     )
-                    max_curated = None if max_curated == 0 else int(max_curated)
+                    st.info(f"Will randomly select ~{percentage}% of available photos")
+
+                elif selection_mode == "Date Range":
+                    from datetime import datetime, timedelta
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        date_from_input = st.date_input(
+                            "From date",
+                            value=datetime.now() - timedelta(days=365),
+                            help="Export photos taken on or after this date"
+                        )
+                        date_from = datetime.combine(date_from_input, datetime.min.time())
+                    with col2:
+                        date_to_input = st.date_input(
+                            "To date",
+                            value=datetime.now(),
+                            help="Export photos taken on or before this date"
+                        )
+                        date_to = datetime.combine(date_to_input, datetime.max.time())
 
                 st.markdown("---")
 
@@ -338,7 +390,11 @@ elif page == "Import from Photos App":
                                     quality=quality,
                                     max_raw=max_raw,
                                     max_curated=max_curated,
-                                    progress_callback=progress_callback
+                                    progress_callback=progress_callback,
+                                    download_missing=download_icloud,
+                                    percentage=percentage,
+                                    date_from=date_from,
+                                    date_to=date_to
                                 )
 
                             progress_bar.progress(100)
@@ -366,7 +422,11 @@ elif page == "Import from Photos App":
                                     max_photos=max_raw,
                                     max_size=max_size,
                                     quality=quality,
-                                    progress_callback=progress_callback
+                                    progress_callback=progress_callback,
+                                    download_missing=download_icloud,
+                                    percentage=percentage,
+                                    date_from=date_from,
+                                    date_to=date_to
                                 )
 
                             progress_bar.progress(100)
@@ -387,7 +447,10 @@ elif page == "Import from Photos App":
                                     max_size=max_size,
                                     quality=quality,
                                     progress_callback=progress_callback,
-                                    download_missing=download_icloud
+                                    download_missing=download_icloud,
+                                    percentage=percentage,
+                                    date_from=date_from,
+                                    date_to=date_to
                                 )
 
                             progress_bar.progress(100)

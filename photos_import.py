@@ -172,7 +172,10 @@ class PhotosLibraryImporter:
         quality: int = 85,
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
         skip_existing: bool = True,
-        download_missing: bool = True
+        download_missing: bool = True,
+        percentage: Optional[float] = None,
+        date_from: Optional[datetime] = None,
+        date_to: Optional[datetime] = None
     ) -> Tuple[int, int]:
         """
         Export photos from Photos library with downsampling.
@@ -187,10 +190,15 @@ class PhotosLibraryImporter:
             progress_callback: Callback function(current, total, filename)
             skip_existing: Skip photos that already exist in output_dir
             download_missing: If True, download photos from iCloud if not available locally
+            percentage: Export only this percentage of photos (0-100), randomly sampled
+            date_from: Only export photos taken on or after this date
+            date_to: Only export photos taken on or before this date
 
         Returns:
             Tuple of (exported_count, skipped_count)
         """
+        import random
+
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
 
@@ -205,6 +213,24 @@ class PhotosLibraryImporter:
             photos = self._get_favorites()
         else:
             photos = self._get_all_photos()
+
+        # Apply date filter
+        if date_from or date_to:
+            filtered = []
+            for p in photos:
+                photo_date = p.date
+                if photo_date:
+                    if date_from and photo_date < date_from:
+                        continue
+                    if date_to and photo_date > date_to:
+                        continue
+                    filtered.append(p)
+            photos = filtered
+
+        # Apply percentage filter (random sampling)
+        if percentage is not None and 0 < percentage < 100:
+            num_to_keep = max(1, int(len(photos) * percentage / 100))
+            photos = random.sample(photos, min(num_to_keep, len(photos)))
 
         total = len(photos)
         if max_photos:
@@ -280,7 +306,10 @@ class PhotosLibraryImporter:
         max_raw: Optional[int] = None,
         max_curated: Optional[int] = None,
         progress_callback: Optional[Callable[[str, int, int, str], None]] = None,
-        download_missing: bool = True
+        download_missing: bool = True,
+        percentage: Optional[float] = None,
+        date_from: Optional[datetime] = None,
+        date_to: Optional[datetime] = None
     ) -> Tuple[int, int, int, int]:
         """
         Export all photos to raw folder and favorites to curated folder.
@@ -294,6 +323,9 @@ class PhotosLibraryImporter:
             max_curated: Maximum curated photos to export
             progress_callback: Callback function(phase, current, total, filename)
             download_missing: If True, download photos from iCloud if not available locally
+            percentage: Export only this percentage of photos (0-100), randomly sampled
+            date_from: Only export photos taken on or after this date
+            date_to: Only export photos taken on or before this date
 
         Returns:
             Tuple of (raw_exported, raw_skipped, curated_exported, curated_skipped)
@@ -314,7 +346,10 @@ class PhotosLibraryImporter:
             max_size=max_size,
             quality=quality,
             progress_callback=raw_callback,
-            download_missing=download_missing
+            download_missing=download_missing,
+            percentage=percentage,
+            date_from=date_from,
+            date_to=date_to
         )
 
         # Export favorites to curated
@@ -325,7 +360,10 @@ class PhotosLibraryImporter:
             max_size=max_size,
             quality=quality,
             progress_callback=curated_callback,
-            download_missing=download_missing
+            download_missing=download_missing,
+            percentage=percentage,
+            date_from=date_from,
+            date_to=date_to
         )
 
         return raw_exported, raw_skipped, curated_exported, curated_skipped
