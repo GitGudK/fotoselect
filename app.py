@@ -370,92 +370,178 @@ elif page == "Import from Photos App":
                         if export_favorites or export_both:
                             clear_folder(CURATED_DIR)
 
-                    progress_bar = st.progress(0)
-                    status_text = st.empty()
-                    stats_container = st.empty()
+                    # Create a prominent loading screen
+                    loading_container = st.container()
+
+                    with loading_container:
+                        st.markdown("---")
+                        st.markdown("## Importing Photos")
+
+                        # Large status header
+                        status_header = st.empty()
+                        status_header.markdown("### Preparing to import...")
+
+                        # Progress bar with percentage
+                        progress_col1, progress_col2 = st.columns([4, 1])
+                        with progress_col1:
+                            progress_bar = st.progress(0)
+                        with progress_col2:
+                            progress_percent = st.empty()
+                            progress_percent.markdown("**0%**")
+
+                        # Current file status
+                        status_text = st.empty()
+                        status_text.info("Starting import process...")
+
+                        # Live statistics
+                        stats_cols = st.columns(4)
+                        with stats_cols[0]:
+                            exported_metric = st.empty()
+                            exported_metric.metric("Exported", 0)
+                        with stats_cols[1]:
+                            skipped_metric = st.empty()
+                            skipped_metric.metric("Skipped", 0)
+                        with stats_cols[2]:
+                            total_metric = st.empty()
+                            total_metric.metric("Total", "...")
+                        with stats_cols[3]:
+                            phase_metric = st.empty()
+                            phase_metric.metric("Phase", "Starting")
+
+                        st.markdown("---")
+
+                    # Track counts for live updates
+                    export_counts = {"exported": 0, "skipped": 0}
 
                     try:
                         if export_both:
                             def progress_callback(phase, current, total, filename):
                                 progress = int((current / total) * 100) if total > 0 else 0
                                 progress_bar.progress(progress)
+                                progress_percent.markdown(f"**{progress}%**")
                                 phase_label = "Raw photos" if phase == "raw" else "Favorites"
-                                status_text.text(f"{phase_label}: {current}/{total} - {filename}")
+                                status_header.markdown(f"### Importing {phase_label}...")
+                                phase_metric.metric("Phase", phase_label)
+                                total_metric.metric("Total", total)
 
-                            with st.spinner("Exporting photos from Photos library..."):
-                                raw_exp, raw_skip, cur_exp, cur_skip = importer.export_all(
-                                    raw_dir=str(RAW_DIR),
-                                    curated_dir=str(CURATED_DIR),
-                                    max_size=max_size,
-                                    quality=quality,
-                                    max_raw=max_raw,
-                                    max_curated=max_curated,
-                                    progress_callback=progress_callback,
-                                    download_missing=download_icloud,
-                                    percentage=percentage,
-                                    date_from=date_from,
-                                    date_to=date_to
-                                )
+                                # Update counts based on filename
+                                if "Skipped" in filename:
+                                    export_counts["skipped"] += 1
+                                    skipped_metric.metric("Skipped", export_counts["skipped"])
+                                else:
+                                    export_counts["exported"] += 1
+                                    exported_metric.metric("Exported", export_counts["exported"])
+
+                                status_text.info(f"Processing: **{filename}** ({current}/{total})")
+
+                            raw_exp, raw_skip, cur_exp, cur_skip = importer.export_all(
+                                raw_dir=str(RAW_DIR),
+                                curated_dir=str(CURATED_DIR),
+                                max_size=max_size,
+                                quality=quality,
+                                max_raw=max_raw,
+                                max_curated=max_curated,
+                                progress_callback=progress_callback,
+                                download_missing=download_icloud,
+                                percentage=percentage,
+                                date_from=date_from,
+                                date_to=date_to
+                            )
 
                             progress_bar.progress(100)
-                            status_text.text("Export complete!")
+                            progress_percent.markdown("**100%**")
+                            status_header.markdown("### Import Complete!")
+                            status_text.success("All photos have been imported successfully!")
+                            phase_metric.metric("Phase", "Done")
+                            exported_metric.metric("Exported", raw_exp + cur_exp)
+                            skipped_metric.metric("Skipped", raw_skip + cur_skip)
 
-                            with stats_container.container():
-                                col1, col2 = st.columns(2)
-                                with col1:
-                                    st.metric("Raw Photos Exported", raw_exp, delta=f"{raw_skip} skipped")
-                                with col2:
-                                    st.metric("Favorites Exported", cur_exp, delta=f"{cur_skip} skipped")
-
-                            st.success("Photos imported successfully!")
+                            st.balloons()
+                            st.success(f"Successfully imported {raw_exp} raw photos and {cur_exp} favorites!")
 
                         elif export_all:
                             def progress_callback(current, total, filename):
                                 progress = int((current / total) * 100) if total > 0 else 0
                                 progress_bar.progress(progress)
-                                status_text.text(f"Exporting: {current}/{total} - {filename}")
+                                progress_percent.markdown(f"**{progress}%**")
+                                status_header.markdown("### Importing All Photos...")
+                                phase_metric.metric("Phase", "All Photos")
+                                total_metric.metric("Total", total)
 
-                            with st.spinner("Exporting all photos..."):
-                                exported, skipped = importer.export_photos(
-                                    output_dir=str(RAW_DIR),
-                                    favorites_only=False,
-                                    max_photos=max_raw,
-                                    max_size=max_size,
-                                    quality=quality,
-                                    progress_callback=progress_callback,
-                                    download_missing=download_icloud,
-                                    percentage=percentage,
-                                    date_from=date_from,
-                                    date_to=date_to
-                                )
+                                if "Skipped" in filename:
+                                    export_counts["skipped"] += 1
+                                    skipped_metric.metric("Skipped", export_counts["skipped"])
+                                else:
+                                    export_counts["exported"] += 1
+                                    exported_metric.metric("Exported", export_counts["exported"])
+
+                                status_text.info(f"Processing: **{filename}** ({current}/{total})")
+
+                            exported, skipped = importer.export_photos(
+                                output_dir=str(RAW_DIR),
+                                favorites_only=False,
+                                max_photos=max_raw,
+                                max_size=max_size,
+                                quality=quality,
+                                progress_callback=progress_callback,
+                                download_missing=download_icloud,
+                                percentage=percentage,
+                                date_from=date_from,
+                                date_to=date_to
+                            )
 
                             progress_bar.progress(100)
-                            status_text.text("Export complete!")
-                            st.success(f"Exported {exported} photos ({skipped} skipped)")
+                            progress_percent.markdown("**100%**")
+                            status_header.markdown("### Import Complete!")
+                            status_text.success("All photos have been imported successfully!")
+                            phase_metric.metric("Phase", "Done")
+                            exported_metric.metric("Exported", exported)
+                            skipped_metric.metric("Skipped", skipped)
+
+                            st.balloons()
+                            st.success(f"Successfully imported {exported} photos ({skipped} skipped)")
 
                         elif export_favorites:
                             def progress_callback(current, total, filename):
                                 progress = int((current / total) * 100) if total > 0 else 0
                                 progress_bar.progress(progress)
-                                status_text.text(f"Exporting: {current}/{total} - {filename}")
+                                progress_percent.markdown(f"**{progress}%**")
+                                status_header.markdown("### Importing Favorites...")
+                                phase_metric.metric("Phase", "Favorites")
+                                total_metric.metric("Total", total)
 
-                            with st.spinner("Exporting favorite photos..."):
-                                exported, skipped = importer.export_photos(
-                                    output_dir=str(CURATED_DIR),
-                                    favorites_only=True,
-                                    max_photos=max_curated,
-                                    max_size=max_size,
-                                    quality=quality,
-                                    progress_callback=progress_callback,
-                                    download_missing=download_icloud,
-                                    percentage=percentage,
-                                    date_from=date_from,
-                                    date_to=date_to
-                                )
+                                if "Skipped" in filename:
+                                    export_counts["skipped"] += 1
+                                    skipped_metric.metric("Skipped", export_counts["skipped"])
+                                else:
+                                    export_counts["exported"] += 1
+                                    exported_metric.metric("Exported", export_counts["exported"])
+
+                                status_text.info(f"Processing: **{filename}** ({current}/{total})")
+
+                            exported, skipped = importer.export_photos(
+                                output_dir=str(CURATED_DIR),
+                                favorites_only=True,
+                                max_photos=max_curated,
+                                max_size=max_size,
+                                quality=quality,
+                                progress_callback=progress_callback,
+                                download_missing=download_icloud,
+                                percentage=percentage,
+                                date_from=date_from,
+                                date_to=date_to
+                            )
 
                             progress_bar.progress(100)
-                            status_text.text("Export complete!")
-                            st.success(f"Exported {exported} favorite photos ({skipped} skipped)")
+                            progress_percent.markdown("**100%**")
+                            status_header.markdown("### Import Complete!")
+                            status_text.success("All favorite photos have been imported successfully!")
+                            phase_metric.metric("Phase", "Done")
+                            exported_metric.metric("Exported", exported)
+                            skipped_metric.metric("Skipped", skipped)
+
+                            st.balloons()
+                            st.success(f"Successfully imported {exported} favorite photos ({skipped} skipped)")
 
                     except Exception as e:
                         st.error(f"Export failed: {str(e)}")
