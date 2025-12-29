@@ -441,7 +441,7 @@ class PhotoCurator:
         # Check score cache for already-scored photos
         from score_cache import get_cached_scores, update_scores
 
-        all_paths = dataset.image_paths
+        all_paths = [str(p) for p in dataset.images]
         all_filenames = [os.path.basename(p) for p in all_paths]
         cached = get_cached_scores(Path(input_folder), all_filenames)
 
