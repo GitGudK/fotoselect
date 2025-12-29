@@ -636,6 +636,53 @@ elif page == "Train Model":
             st.error(f"Training failed: {str(e)}")
             raise e
 
+    # Model Management Section
+    st.markdown("---")
+    st.markdown("### Model Management")
+
+    # List existing saved models
+    saved_models = list(CHECKPOINTS_DIR.glob("*.pt"))
+    saved_models = [m for m in saved_models if m.name not in ["best.pt", "last.pt"]]
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        # Save current model with custom name
+        model_name = st.text_input(
+            "Save model as",
+            placeholder="my_model",
+            help="Enter a name for your model (without .pt extension)"
+        )
+
+        if st.button("💾 Save Model", disabled=not has_model or not model_name):
+            import shutil
+            source = CHECKPOINTS_DIR / "best.pt"
+            # Sanitize filename
+            safe_name = "".join(c for c in model_name if c.isalnum() or c in "-_").strip()
+            if safe_name:
+                dest = CHECKPOINTS_DIR / f"{safe_name}.pt"
+                shutil.copy2(source, dest)
+                st.success(f"Model saved as '{safe_name}.pt'")
+                st.rerun()
+            else:
+                st.error("Please enter a valid model name")
+
+    with col2:
+        if saved_models:
+            st.markdown("**Saved Models:**")
+            for model_path in sorted(saved_models):
+                model_col1, model_col2 = st.columns([3, 1])
+                with model_col1:
+                    st.text(model_path.name)
+                with model_col2:
+                    if st.button("Load", key=f"load_{model_path.name}"):
+                        import shutil
+                        shutil.copy2(model_path, CHECKPOINTS_DIR / "best.pt")
+                        st.success(f"Loaded '{model_path.name}' as active model")
+                        st.rerun()
+        else:
+            st.info("No saved models yet. Train a model and save it with a custom name.")
+
 # ============================================================================
 # PREDICT PAGE
 # ============================================================================
