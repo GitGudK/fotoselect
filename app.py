@@ -348,17 +348,19 @@ elif page == "Import Photos":
                         cleared = []
                         if RAW_DIR.exists():
                             clear_folder(RAW_DIR)
-                            # Also clear date cache
-                            date_cache = RAW_DIR / ".photo_dates.json"
-                            if date_cache.exists():
-                                date_cache.unlink()
+                            # Also clear date and score caches
+                            for cache_file in [".photo_dates.json", ".photo_scores.json"]:
+                                cache_path = RAW_DIR / cache_file
+                                if cache_path.exists():
+                                    cache_path.unlink()
                             cleared.append(f"raw ({raw_count} files)")
                         if CURATED_DIR.exists():
                             clear_folder(CURATED_DIR)
-                            # Also clear date cache
-                            date_cache = CURATED_DIR / ".photo_dates.json"
-                            if date_cache.exists():
-                                date_cache.unlink()
+                            # Also clear date and score caches
+                            for cache_file in [".photo_dates.json", ".photo_scores.json"]:
+                                cache_path = CURATED_DIR / cache_file
+                                if cache_path.exists():
+                                    cache_path.unlink()
                             cleared.append(f"curated ({curated_count} files)")
                         if cleared:
                             st.success(f"Cleared: {', '.join(cleared)}")

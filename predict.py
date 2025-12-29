@@ -146,7 +146,8 @@ class PhotoCurator:
     def select_by_time_groups(
         self,
         results: List[Tuple[str, float]],
-        progress_callback: Optional[callable] = None
+        progress_callback: Optional[callable] = None,
+        folder: Optional[Path] = None
     ) -> List[Tuple[str, float, bool]]:
         """
         Select best photos from each time group.
@@ -154,12 +155,11 @@ class PhotoCurator:
         Args:
             results: List of (path, score) tuples, sorted by score descending
             progress_callback: Optional callback for progress updates
+            folder: Folder containing images (for date cache)
 
         Returns:
             List of (path, score, should_curate) tuples
         """
-        # Get dates for all photos
-        photo_dates = {}
         cutoff_date = None
 
         if self.time_grouping == "Last N Days" and self.last_n_days:
@@ -167,8 +167,18 @@ class PhotoCurator:
 
         print(f"\nGrouping photos by {self.time_grouping}...")
 
-        for i, (path, score) in enumerate(results):
-            dt = self.get_photo_date(path)
+        # Get all image paths and determine folder
+        image_paths = [path for path, score in results]
+        if folder is None and image_paths:
+            folder = Path(image_paths[0]).parent
+
+        # Use batch date extraction from cache
+        date_map = self.get_photo_dates_batch(folder, image_paths, progress_callback)
+
+        # Build photo_dates dict with cutoff filter
+        photo_dates = {}
+        for path in image_paths:
+            dt = date_map.get(path)
             if dt:
                 # For "Last N Days", filter out photos outside the range
                 if cutoff_date and dt < cutoff_date:
@@ -177,9 +187,6 @@ class PhotoCurator:
                     photo_dates[path] = dt
             else:
                 photo_dates[path] = None
-
-            if progress_callback and (i + 1) % 50 == 0:
-                progress_callback(i + 1, len(results), 'dates')
 
         # Group photos by time period
         groups = defaultdict(list)
@@ -224,6 +231,73 @@ class PhotoCurator:
             final_results.append((path, score, should_curate))
 
         return final_results
+
+    def sample_photos_by_time_group(
+        self,
+        image_paths: List[str],
+        folder: Path,
+        samples_per_group: int = 50,
+        progress_callback: Optional[callable] = None
+    ) -> List[str]:
+        """
+        Sample photos from each time group to reduce the number to score.
+
+        Instead of scoring all 55k photos, sample N photos per time group
+        (year/month) and only score those. This dramatically speeds up
+        time-based selection.
+
+        Args:
+            image_paths: List of all image paths
+            folder: Folder containing images (for date cache)
+            samples_per_group: How many photos to sample per time group
+            progress_callback: Optional callback for progress
+
+        Returns:
+            Sampled list of image paths
+        """
+        import random
+        from collections import defaultdict
+
+        print(f"\nPre-sampling photos by {self.time_grouping} for faster scoring...")
+
+        # Get dates for all photos from cache
+        date_map = self.get_photo_dates_batch(folder, image_paths, progress_callback)
+
+        # Group photos by time period
+        groups = defaultdict(list)
+        no_date_photos = []
+
+        cutoff_date = None
+        if self.time_grouping == "Last N Days" and self.last_n_days:
+            cutoff_date = datetime.now() - timedelta(days=self.last_n_days)
+
+        for path in image_paths:
+            dt = date_map.get(path)
+            if dt is None:
+                no_date_photos.append(path)
+            elif cutoff_date and dt < cutoff_date:
+                continue  # Outside "Last N Days" range
+            else:
+                key = self.get_time_group_key(dt)
+                groups[key].append(path)
+
+        # Sample from each group
+        sampled = []
+        random.seed(42)  # For reproducibility
+
+        for key in sorted(groups.keys(), reverse=True):
+            group_photos = groups[key]
+            # Sample up to samples_per_group photos from this group
+            if len(group_photos) <= samples_per_group:
+                sampled.extend(group_photos)
+            else:
+                sampled.extend(random.sample(group_photos, samples_per_group))
+            print(f"  {key}: {len(group_photos)} photos -> sampled {min(len(group_photos), samples_per_group)}")
+
+        print(f"Total sampled: {len(sampled)} photos from {len(groups)} time groups")
+        print(f"  (Reduced from {len(image_paths)} photos, {len(no_date_photos)} had no date)")
+
+        return sampled
 
     def filter_photos_by_pool(
         self,
@@ -364,28 +438,63 @@ class PhotoCurator:
             print("No images found in folder (or all filtered out)")
             return []
 
-        loader = DataLoader(
-            dataset,
-            batch_size=batch_size,
-            shuffle=False,
-            num_workers=4,
-            pin_memory=True
-        )
+        # Check score cache for already-scored photos
+        from score_cache import get_cached_scores, update_scores
 
-        results = []
-        total_batches = len(loader)
-        processed = 0
+        all_paths = dataset.image_paths
+        all_filenames = [os.path.basename(p) for p in all_paths]
+        cached = get_cached_scores(Path(input_folder), all_filenames)
 
-        for images, paths in tqdm(loader, desc='Predicting'):
-            images = images.to(self.device)
-            scores = self.model.predict_proba(images)
+        # Separate cached and uncached photos
+        cached_results = []
+        needs_scoring = []
 
-            for path, score in zip(paths, scores.cpu().numpy()):
-                results.append((path, float(score)))
+        for path, filename in zip(all_paths, all_filenames):
+            if cached.get(filename) is not None:
+                cached_results.append((path, cached[filename]))
+            else:
+                needs_scoring.append(path)
 
-            processed += 1
-            if progress_callback:
-                progress_callback(processed, total_batches, 'scoring')
+        print(f"Score cache: {len(cached_results)} cached, {len(needs_scoring)} need scoring")
+
+        results = list(cached_results)
+
+        # Only score uncached photos
+        if needs_scoring:
+            # Create a dataset with only uncached photos
+            uncached_dataset = InferenceDataset(input_folder, image_size=image_size, image_paths=needs_scoring)
+            loader = DataLoader(
+                uncached_dataset,
+                batch_size=batch_size,
+                shuffle=False,
+                num_workers=4,
+                pin_memory=True
+            )
+
+            new_scores = {}
+            total_batches = len(loader)
+            processed = 0
+
+            for images, paths in tqdm(loader, desc='Scoring'):
+                images = images.to(self.device)
+                scores = self.model.predict_proba(images)
+
+                for path, score in zip(paths, scores.cpu().numpy()):
+                    score_val = float(score)
+                    results.append((path, score_val))
+                    new_scores[os.path.basename(path)] = score_val
+
+                processed += 1
+                if progress_callback:
+                    progress_callback(processed, total_batches, 'scoring')
+
+            # Save new scores to cache
+            if new_scores:
+                update_scores(Path(input_folder), new_scores)
+                print(f"Cached {len(new_scores)} new scores")
+        elif progress_callback:
+            # All from cache - still call progress to update UI
+            progress_callback(1, 1, 'scoring')
 
         # Sort by score descending
         results.sort(key=lambda x: x[1], reverse=True)
@@ -393,7 +502,7 @@ class PhotoCurator:
         # Determine which photos to curate based on selection mode
         if self.time_grouping is not None:
             # Time-based selection: pick best from each time group
-            final_results = self.select_by_time_groups(results, progress_callback)
+            final_results = self.select_by_time_groups(results, progress_callback, folder=Path(input_folder))
         else:
             # Standard selection modes
             total = len(results)

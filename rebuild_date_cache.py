@@ -86,6 +86,13 @@ def rebuild_cache_from_photos_db(folder: Path, progress_callback=None) -> dict:
     with open(cache_path, 'w') as f:
         json.dump(cache, f)
 
+    # Invalidate in-memory cache so next access reloads from disk
+    try:
+        from date_cache import invalidate_cache
+        invalidate_cache(folder)
+    except ImportError:
+        pass
+
     print(f"\nResults:")
     print(f"  Total files: {total}")
     print(f"  Matched: {matched} ({100*matched/total:.1f}%)")

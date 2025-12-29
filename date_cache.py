@@ -97,6 +97,10 @@ def extract_dates_batch_exiftool(paths: List[str]) -> Dict[str, Optional[str]]:
     return results
 
 
+# Module-level cache to avoid reloading JSON repeatedly
+_loaded_caches: Dict[str, Dict[str, Optional[str]]] = {}
+
+
 def get_photo_dates(
     folder: Path,
     image_paths: List[str],
@@ -113,15 +117,18 @@ def get_photo_dates(
     Returns:
         Dict mapping image path to datetime (or None if no date)
     """
-    # Load existing cache
-    cache = load_cache(folder)
+    # Use module-level cache to avoid reloading JSON file repeatedly
+    folder_key = str(folder)
+    if folder_key not in _loaded_caches:
+        _loaded_caches[folder_key] = load_cache(folder)
+    cache = _loaded_caches[folder_key]
 
     results = {}
     needs_extraction = []
     total = len(image_paths)
 
-    # Check cache first
-    for i, path in enumerate(image_paths):
+    # Check cache first - this should be fast now
+    for path in image_paths:
         filename = os.path.basename(path)
 
         if filename in cache:
@@ -130,15 +137,13 @@ def get_photo_dates(
         else:
             needs_extraction.append(path)
 
-        if progress_callback and (i + 1) % 1000 == 0:
-            progress_callback(i + 1, total, 'filtering')
-
     if not needs_extraction:
         return results
 
     # Extract dates for uncached files
     # First pass: PIL (fast for JPEGs with EXIF)
     still_needs_exiftool = []
+    cache_modified = False
 
     for i, path in enumerate(needs_extraction):
         date_str = extract_date_pil(path)
@@ -147,6 +152,7 @@ def get_photo_dates(
         if date_str:
             cache[filename] = date_str
             results[path] = parse_date(date_str)
+            cache_modified = True
         else:
             still_needs_exiftool.append(path)
 
@@ -161,9 +167,11 @@ def get_photo_dates(
             filename = os.path.basename(path)
             cache[filename] = date_str
             results[path] = parse_date(date_str)
+            cache_modified = True
 
-    # Save updated cache
-    save_cache(folder, cache)
+    # Only save if we added new entries
+    if cache_modified:
+        save_cache(folder, cache)
 
     # Fill in any missing paths
     for path in image_paths:
@@ -171,6 +179,17 @@ def get_photo_dates(
             results[path] = None
 
     return results
+
+
+def invalidate_cache(folder: Path = None):
+    """Invalidate the in-memory cache for a folder, or all folders if None."""
+    global _loaded_caches
+    if folder is None:
+        _loaded_caches = {}
+    else:
+        folder_key = str(folder)
+        if folder_key in _loaded_caches:
+            del _loaded_caches[folder_key]
 
 
 def rebuild_cache(folder: Path, progress_callback: Optional[callable] = None) -> int:
